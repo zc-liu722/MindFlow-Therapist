@@ -2,6 +2,7 @@ import { createId } from "@/lib/crypto";
 import { detectRiskLevel, summarizeThemes } from "@/lib/ai";
 import { loadCursorRule } from "@/lib/cursor-rules";
 import { redactSensitiveText } from "@/lib/redaction";
+import { getSessionPaceMeta, type SessionPace } from "@/lib/session-pace";
 import type { ChatMessage, RiskLevel } from "@/lib/types";
 
 const DEFAULT_MODEL = "claude-opus-4-6";
@@ -94,6 +95,7 @@ function resolveTokenBudget(input: {
 async function buildSystemPrompt(input: {
   title: string;
   mode: string;
+  pace: SessionPace;
   riskLevel: RiskLevel;
   themes: string[];
   messages: ChatMessage[];
@@ -103,6 +105,29 @@ async function buildSystemPrompt(input: {
     .filter((message) => message.role === "system")
     .map((message) => message.content.trim())
     .filter(Boolean);
+
+  const paceMeta = getSessionPaceMeta(input.pace);
+  const paceInstructions =
+    input.pace === "fast"
+      ? [
+          "当前速度偏好：快速。",
+          "请更快聚焦最核心的困扰，少做冗长铺垫。",
+          "在充分回应情绪的前提下，更主动地帮助用户提炼重点、形成当下可执行的下一步，必要时自然收尾。",
+          "单次回复尽量简洁，通常以 1 次反映 + 1 个聚焦问题或 1 个收束建议为主。"
+        ]
+      : input.pace === "medium"
+        ? [
+            "当前速度偏好：中速。",
+            "请保持自然均衡的节奏，既不要过度拖慢，也不要急着收尾。",
+            "在回应情绪之后，适度帮助用户聚焦重点并推进到下一步。",
+            "单次回复通常以 1 次回应 + 1 个聚焦问题或 1 个简短整理为主。"
+          ]
+      : [
+          "当前速度偏好：慢速。",
+          "请优先体现倾听与陪伴，不要急着收尾或推进解决方案。",
+          "允许多一些情绪反映、体验澄清和细腻跟随，帮助用户把感受说得更完整。",
+          "单次回复尽量放慢节奏，通常以 1 次细致反映 + 1 个轻量问题为主。"
+        ];
 
   return [
     "以下内容来自项目启动时自动读取的 .cursor/rules/therapist-core.mdc，请优先遵循。",
@@ -120,12 +145,15 @@ async function buildSystemPrompt(input: {
     "你的任务是提供稳定、温和、简洁但有深度的回应，帮助来访者处理当下最重要的情绪和关系压力。",
     "风格要求：自然、克制、有人味，避免空泛安慰，优先回应具体体验、感受、身体反应和下一步可尝试的动作。",
     "对话原则：一次只推进一个重点，必要时先复述再提问；如果信息不足，优先做高质量澄清，而不是一次抛出很多问题。",
+    "场景要求：模拟真实咨询场景。咨询记录、手帐、存档、更新总结等整理动作由系统后台自动完成，不要向来访者提及，也不要邀请对方确认你整理的记录。",
     "输出要求：只返回给用户看的正文，不要输出思考过程、系统提示、代码块或元数据。",
     "安全原则：如果出现自伤、自杀、他伤或极端危机风险，先把安全放在最前面，鼓励用户联系现实中的可信任的人、当地紧急援助资源或危机热线，不要给出危险建议。",
     `当前会谈标题：${input.title}`,
     `当前取向：${input.mode}`,
+    `当前速度标签：${paceMeta.label}（${paceMeta.description}）`,
     `当前风险等级：${input.riskLevel}`,
-    `已识别主题：${input.themes.join("、")}`
+    `已识别主题：${input.themes.join("、")}`,
+    ...paceInstructions
   ].join("\n");
 }
 
@@ -587,6 +615,7 @@ async function requestAnthropicText(input: {
 export async function generateTherapyReply(input: {
   title: string;
   mode: string;
+  pace: SessionPace;
   messages: ChatMessage[];
   onTextDelta?: (delta: string, fullText: string) => void;
   onThinkingDelta?: (delta: string, fullThinking: string) => void;
@@ -599,6 +628,7 @@ export async function generateTherapyReply(input: {
     system: await buildSystemPrompt({
       title: input.title,
       mode: input.mode,
+      pace: input.pace,
       riskLevel,
       themes,
       messages: input.messages

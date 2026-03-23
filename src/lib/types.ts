@@ -1,3 +1,5 @@
+import type { SessionPace } from "@/lib/session-pace";
+
 export type Role = "user" | "admin";
 
 export type MessageRole = "user" | "assistant" | "supervisor" | "system";
@@ -48,6 +50,7 @@ export interface TherapySessionRecord {
   userId: string;
   title: string;
   mode: string;
+  pace: SessionPace;
   status: SessionStatus;
   autoSupervision: boolean;
   createdAt: string;

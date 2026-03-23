@@ -19,6 +19,19 @@ type Overview = {
   eventsByType: { type: string; count: number }[];
 };
 
+function formatDateOnly(value?: string) {
+  if (!value) {
+    return "-";
+  }
+
+  const [year = "", month = "", day = ""] = value.slice(0, 10).split("-");
+  if (!year || !month || !day) {
+    return value;
+  }
+
+  return `${year.slice(-2)}/${month}/${day}`;
+}
+
 export function AdminDashboard({ user }: { user: User }) {
   const router = useRouter();
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -114,7 +127,7 @@ export function AdminDashboard({ user }: { user: User }) {
           <div className="mini-table">
             {overview?.sessionsByDay.map((item) => (
               <div className="mini-row" key={item.date}>
-                <span>{item.date}</span>
+                <span>{formatDateOnly(item.date)}</span>
                 <strong>{item.count}</strong>
               </div>
             )) ?? <p className="muted">暂无数据</p>}

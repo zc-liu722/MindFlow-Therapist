@@ -1,6 +1,7 @@
 import { createId } from "@/lib/crypto";
 import { redactSensitiveText } from "@/lib/redaction";
 import { DEFAULT_SESSION_MODE } from "@/lib/session-modes";
+import { DEFAULT_SESSION_PACE, type SessionPace } from "@/lib/session-pace";
 import type { ChatMessage, RiskLevel } from "@/lib/types";
 
 export function detectRiskLevel(text: string): RiskLevel {
@@ -45,7 +46,10 @@ export function summarizeThemes(messages: ChatMessage[]) {
   return themes.length > 0 ? themes : ["情绪梳理", "压力识别"];
 }
 
-export function buildAssistantReply(messages: ChatMessage[]) {
+export function buildAssistantReply(
+  messages: ChatMessage[],
+  pace: SessionPace = DEFAULT_SESSION_PACE
+) {
   const lastUserMessage =
     [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
   const themes = summarizeThemes(messages);
@@ -59,10 +63,18 @@ export function buildAssistantReply(messages: ChatMessage[]) {
   const reply = [
     empathicLead,
     `这一段内容里我特别留意到的主题是：${themes.join("、")}。`,
-    "如果你愿意，我们先聚焦一个最刺痛的瞬间，看看它触发了什么想法、情绪和身体反应。",
+    pace === "fast"
+      ? "我先帮你把最核心的卡点拎出来，再一起收成一个当下能用的小方向。"
+      : pace === "medium"
+        ? "如果你愿意，我们先抓住眼前最关键的一点，再看看它牵动了哪些想法、情绪和身体反应。"
+      : "如果你愿意，我们先聚焦一个最刺痛的瞬间，看看它触发了什么想法、情绪和身体反应。",
     riskLevel === "high"
       ? "如果你有现实中的自伤风险，请优先联系身边可信任的人或当地紧急援助资源。"
-      : "你不需要一次把所有问题说清楚，我们可以只处理眼前最需要被理解的部分。"
+      : pace === "fast"
+        ? "你不需要一次讲完全部，我们先把当下最重要的一点说清，再慢慢落地。"
+        : pace === "medium"
+          ? "你不用一下子把所有部分都讲清，我们先处理眼前最需要被看见的那一块。"
+        : "你不需要一次把所有问题说清楚，我们可以只处理眼前最需要被理解的部分。"
   ].join("\n\n");
 
   return {

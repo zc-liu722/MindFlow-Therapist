@@ -19,9 +19,14 @@ export type SessionProgressSnapshot = {
   phase: "opening" | "exploration" | "integration" | "closing" | "completed";
   phaseLabel: string;
   summary: string;
-  milestoneLabel: string;
   detailLabel: string;
 };
+
+const PROGRESS_PHASE_THRESHOLDS = {
+  opening: 24,
+  exploration: 60,
+  integration: 86
+} as const;
 
 const THEME_PATTERNS: Array<[string, RegExp]> = [
   ["关系压力", /(关系|伴侣|家庭|父母|婚姻|朋友|同事|社交)/g],
@@ -51,6 +56,31 @@ function summarizeThemes(text: string) {
     .map(([label]) => label);
 }
 
+function resolvePhaseFromPercent(percent: number): SessionProgressSnapshot["phase"] {
+  if (percent >= PROGRESS_PHASE_THRESHOLDS.integration) {
+    return "closing";
+  }
+
+  if (percent >= PROGRESS_PHASE_THRESHOLDS.exploration) {
+    return "integration";
+  }
+
+  if (percent >= PROGRESS_PHASE_THRESHOLDS.opening) {
+    return "exploration";
+  }
+
+  return "opening";
+}
+
+function resolveActivePhaseFromPercent(
+  percent: number
+): Exclude<SessionProgressSnapshot["phase"], "completed"> {
+  return resolvePhaseFromPercent(percent) as Exclude<
+    SessionProgressSnapshot["phase"],
+    "completed"
+  >;
+}
+
 export function estimateSessionProgress(
   session: SessionProgressInput
 ): SessionProgressSnapshot {
@@ -59,6 +89,7 @@ export function estimateSessionProgress(
   );
   const userMessages = visibleMessages.filter((message) => message.role === "user");
   const assistantMessages = visibleMessages.filter((message) => message.role === "assistant");
+  const exchangeCount = Math.min(userMessages.length, assistantMessages.length);
   const conversationText = userMessages.map((message) => message.content).join("\n");
   const recentText = visibleMessages.slice(-4).map((message) => message.content).join("\n");
 
@@ -129,6 +160,12 @@ export function estimateSessionProgress(
     integration: clamp(integrationWork * 0.68 + reflectionScore * 0.18 + actionScore * 0.14, 0, 1),
     closing: clamp(closingCueScore * 0.72 + actionScore * 0.28, 0, 1)
   };
+  const turnCoverage = {
+    opening: clamp(exchangeCount / 2, 0, 1),
+    exploration: clamp(exchangeCount / 5, 0, 1),
+    integration: clamp(exchangeCount / 8, 0, 1),
+    closing: clamp(exchangeCount / 11, 0, 1)
+  } as const;
 
   const phase =
     session.status === "completed"
@@ -145,7 +182,7 @@ export function estimateSessionProgress(
     opening: [0, 22],
     exploration: [24, 58],
     integration: [60, 84],
-    closing: [86, 97]
+    closing: [86, 99]
   } as const;
 
   if (phase === "completed") {
@@ -154,31 +191,58 @@ export function estimateSessionProgress(
       phase,
       phaseLabel: "本次会谈已完成",
       summary: "会谈已归档，可回看记录与督导内容。",
-      milestoneLabel: "已完成",
       detailLabel: "四个阶段已全部结束"
     };
   }
 
-  const phaseCopy = {
+  const [start, end] = progressRanges[phase];
+  const turnSeed = turnCoverage[phase];
+  const seedBase = Math.max(stageSeeds[phase], turnSeed * 0.82);
+  const closingApproach =
+    phase === "closing"
+      ? clamp(
+          Math.max(
+            seedBase,
+            closingCueScore * 0.94,
+            actionScore * 0.9,
+            turnSeed * 0.9,
+            clamp((exchangeCount - 8) / 4, 0, 1) * 0.92 + closingCueScore * 0.08
+          ),
+          0,
+          1
+        )
+      : seedBase;
+  const seed = phase === "closing" ? closingApproach : seedBase;
+  const heuristicPercent = Math.round(start + (end - start) * seed);
+  const turnDrivenFloor =
+    visibleMessages.length > 0
+      ? clamp(
+          phase === "closing"
+            ? 88 + Math.max(0, visibleMessages.length - 12)
+            : 6 + visibleMessages.length,
+          0,
+          99
+        )
+      : 0;
+  const percent = clamp(Math.max(heuristicPercent, turnDrivenFloor), 0, 99);
+  const displayPhase = resolveActivePhaseFromPercent(percent);
+  const displayPhaseCopy = {
     opening: {
       phaseLabel: "正在建立本次会谈焦点",
       summary: "先把当前最需要被看见的情绪、情境和期待摆到台面上。",
-      milestoneLabel: "开始",
       detailLabel: userMessages.length > 0 ? "已接住开场信息" : "等待第一条消息"
     },
     exploration: {
       phaseLabel: "正在展开体验与关键主题",
-      summary: "咨询师会继续追踪情绪、关系和触发点，不会只按轮数草草推进。",
-      milestoneLabel: "展开",
+      summary: "会结合谈话内容继续深入，同时每轮对话都会稳步向前推进。",
       detailLabel:
         themes.length > 0
           ? `已浮现 ${themes.length} 个主题`
-          : `已完成 ${visibleMessages.length} 轮来回`
+          : `已完成 ${visibleMessages.length} 轮对话推进`
     },
     integration: {
       phaseLabel: "正在整理线索并形成理解",
       summary: "会把已经浮现的模式和感受串起来，慢慢靠近更清晰的理解。",
-      milestoneLabel: "整理",
       detailLabel:
         reflectionHits > 0
           ? `已出现 ${reflectionHits} 次反思回应`
@@ -187,22 +251,16 @@ export function estimateSessionProgress(
     closing: {
       phaseLabel: "正在收束本次会谈",
       summary: "开始把重点收拢成可带走的线索、提醒或下次继续的方向。",
-      milestoneLabel: "收束",
       detailLabel:
         actionHits > 0 ? `已形成 ${actionHits} 个行动/收束线索` : "正在整理可带走的重点"
     }
-  }[phase];
-
-  const [start, end] = progressRanges[phase];
-  const seed = stageSeeds[phase];
-  const percent = Math.round(start + (end - start) * seed);
+  }[displayPhase];
 
   return {
     percent,
-    phase,
-    phaseLabel: phaseCopy.phaseLabel,
-    summary: phaseCopy.summary,
-    milestoneLabel: phaseCopy.milestoneLabel,
-    detailLabel: phaseCopy.detailLabel
+    phase: displayPhase,
+    phaseLabel: displayPhaseCopy.phaseLabel,
+    summary: displayPhaseCopy.summary,
+    detailLabel: displayPhaseCopy.detailLabel
   };
 }

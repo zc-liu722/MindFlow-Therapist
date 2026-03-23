@@ -2427,6 +2427,100 @@ a {
   font-weight: 600;
 }
 
+.pace-control {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.pace-icon-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding-inline: 0.8rem 0.9rem;
+  font-weight: 600;
+}
+
+.pace-icon-button svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.pace-popover {
+  position: absolute;
+  top: calc(100% + 0.55rem);
+  left: 0;
+  z-index: 30;
+  width: min(21rem, calc(100vw - 2.4rem));
+  padding: 0.9rem;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, var(--surface-glass-strong), color-mix(in srgb, var(--surface-glass) 76%, transparent)),
+    var(--surface-elevated);
+  box-shadow:
+    0 22px 48px rgba(49, 18, 32, 0.18),
+    inset 0 1px 0 color-mix(in srgb, white 52%, transparent);
+}
+
+.pace-popover-title {
+  margin: 0 0 0.65rem;
+  padding-left: 0.2rem;
+  font-size: 0.84rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-strong);
+}
+
+.pace-popover-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+}
+
+.pace-popover-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.18rem;
+  width: 100%;
+  padding: 0.82rem 0.92rem;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  color: var(--muted-strong);
+  text-align: left;
+  transition:
+    background 180ms ease,
+    color 180ms ease,
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.pace-popover-option strong {
+  font-size: 0.95rem;
+}
+
+.pace-popover-option span {
+  font-size: 0.84rem;
+  line-height: 1.45;
+  color: inherit;
+  opacity: 0.82;
+}
+
+.pace-popover-option:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--surface-glass-strong) 88%, transparent);
+}
+
+.pace-popover-option.is-active {
+  background: linear-gradient(180deg, rgba(255, 232, 241, 0.96), rgba(255, 209, 228, 0.92));
+  color: #6c1f43;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 10px 24px rgba(181, 85, 129, 0.16);
+}
+
 .session-time-pill {
   flex: 0 0 auto;
   padding-inline: 0.88rem;
@@ -3172,22 +3266,33 @@ a {
 }
 
 .session-progress-meta strong,
-.session-progress-foot span:first-child {
+.session-progress-percent {
   font-size: 0.9rem;
 }
 
 .session-progress-meta p,
-.session-progress-foot span:last-child {
+.session-progress-detail {
   margin: 0.18rem 0 0;
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.42;
 }
 
-.session-progress-meta > span,
-.session-progress-foot span:first-child {
+.session-progress-foot {
+  align-items: center;
+}
+
+.session-progress-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.session-progress-percent {
   flex: 0 0 auto;
   white-space: nowrap;
+  margin-top: 0;
+  text-align: right;
 }
 
 .session-progress-track {
@@ -4016,6 +4121,37 @@ a {
   align-items: center;
 }
 
+.modal-inline-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0 1.2rem;
+  padding: 1rem 1.05rem;
+  border-radius: 24px;
+  border: 1px solid rgba(230, 107, 151, 0.2);
+  background: color-mix(in srgb, var(--surface-glass-strong) 74%, rgba(230, 107, 151, 0.08));
+}
+
+.modal-inline-alert-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.modal-inline-alert-copy strong {
+  color: var(--text);
+  font-size: 0.98rem;
+}
+
+.modal-inline-alert-copy p {
+  margin: 0;
+}
+
+.modal-inline-delete-button {
+  flex: 0 0 auto;
+}
+
 .modal-actions-create-session {
   justify-content: flex-end;
 }
@@ -4285,6 +4421,10 @@ a {
     flex-direction: column;
   }
 
+  .modal-inline-alert {
+    align-items: flex-start;
+  }
+
   .header-utility-row-main {
     flex-direction: row;
     align-items: center;
@@ -4331,8 +4471,10 @@ a {
   .session-floating-bar {
     order: 4;
     width: 100%;
-    justify-content: space-between;
-    gap: 0.65rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 0.55rem 0.6rem;
   }
 
   .chat-stage-session-meta,
@@ -4344,27 +4486,100 @@ a {
   .chat-stage-session-meta {
     grid-column: 1;
     grid-row: 1;
+    min-width: 0;
   }
 
   .session-stage-actions {
-    grid-column: 1;
-    grid-row: 2;
-    justify-self: start;
-    width: 100%;
-    justify-content: flex-start;
-    flex-wrap: wrap;
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    width: auto;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
     flex-direction: row;
+    align-items: center;
   }
 
-  .session-progress-meta,
-  .session-progress-foot {
+  .session-progress-meta {
     flex-direction: column;
     gap: 0.45rem;
   }
 
-  .session-progress-meta > span,
-  .session-progress-foot span:first-child {
-    white-space: normal;
+  .header-session-signals {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: start;
+    gap: 0.35rem 0.45rem;
+  }
+
+  .session-mode-pill {
+    grid-column: 1 / -1;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    padding-inline: 0.78rem 0.84rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pace-control {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+  }
+
+  .pace-icon-button {
+    min-height: 1.92rem;
+    padding-inline: 0.62rem 0.68rem;
+    gap: 0.32rem;
+  }
+
+  .pace-icon-button svg {
+    width: 0.78rem;
+    height: 0.78rem;
+  }
+
+  .session-time-pill {
+    grid-column: 3;
+    grid-row: 2;
+    min-width: 0;
+    justify-self: end;
+    padding-inline: 0.72rem;
+  }
+
+  .pace-popover {
+    left: auto;
+    right: 0;
+  }
+
+  .session-stage-actions .primary-button,
+  .session-stage-actions .ghost-button {
+    min-height: 2.4rem;
+    border-radius: 18px;
+    padding: 0.68rem 0.92rem;
+  }
+
+  .session-stage-actions .ghost-button {
+    min-width: 2.4rem;
+    padding: 0;
+  }
+
+  .session-progress-card {
+    gap: 0.45rem;
+    padding: 0.72rem 0.82rem;
+    border-radius: 18px;
+  }
+
+  .session-progress-meta strong,
+  .session-progress-percent {
+    font-size: 0.84rem;
+  }
+
+  .session-progress-detail,
+  .session-progress-meta p {
+    font-size: 0.76rem;
+    line-height: 1.36;
   }
 
   .signal-pill,
@@ -4619,7 +4834,40 @@ a {
 
   .session-stage-actions {
     flex-direction: row;
-    gap: 0.55rem;
+    gap: 0.45rem;
+  }
+
+  .header-session-signals .signal-pill {
+    min-height: 1.8rem;
+    padding: 0.28rem 0.6rem;
+    font-size: 0.76rem;
+  }
+
+  .pace-icon-button {
+    padding-inline: 0.52rem;
+    gap: 0;
+  }
+
+  .pace-icon-button span {
+    display: none;
+  }
+
+  .pace-icon-button svg {
+    width: 0.72rem;
+    height: 0.72rem;
+  }
+
+  .session-progress-foot {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+  }
+
+  .session-progress-detail {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .theme-toggle-button::after {

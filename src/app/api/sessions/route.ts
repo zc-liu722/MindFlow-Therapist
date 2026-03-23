@@ -4,6 +4,7 @@ import { requireRole } from "@/lib/auth";
 import { createSession, listSessionsForUser } from "@/lib/domain";
 import { assertRateLimit } from "@/lib/rate-limit";
 import { DEFAULT_SESSION_MODE, normalizeSessionMode } from "@/lib/session-modes";
+import { DEFAULT_SESSION_PACE, normalizeSessionPace } from "@/lib/session-pace";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +37,7 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       title?: string;
       mode?: string;
+      pace?: string;
     };
 
     if (!body.title) {
@@ -44,7 +46,8 @@ export async function POST(request: Request) {
 
     const session = await createSession(user, {
       title: body.title,
-      mode: normalizeSessionMode(body.mode ?? DEFAULT_SESSION_MODE)
+      mode: normalizeSessionMode(body.mode ?? DEFAULT_SESSION_MODE),
+      pace: normalizeSessionPace(body.pace ?? DEFAULT_SESSION_PACE)
     });
 
     return NextResponse.json({ session });

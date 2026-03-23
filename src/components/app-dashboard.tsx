@@ -21,6 +21,13 @@ import {
   normalizeSessionMode,
   type SessionMode
 } from "@/lib/session-modes";
+import {
+  DEFAULT_SESSION_PACE,
+  SESSION_PACE_CATALOG,
+  getSessionPaceMeta,
+  normalizeSessionPace,
+  type SessionPace
+} from "@/lib/session-pace";
 
 type User = {
   id: string;
@@ -32,6 +39,7 @@ type SessionRecord = {
   id: string;
   title: string;
   mode: string;
+  pace: SessionPace;
   status: "active" | "completed";
   autoSupervision: boolean;
   updatedAt: string;
@@ -85,12 +93,14 @@ function formatDateTime(value?: string) {
     return "-";
   }
 
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(new Date(value));
+  const date = new Date(value);
+  const year = String(date.getFullYear()).slice(-2);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+
+  return `${year}/${month}/${day} ${hour}:${minute}`;
 }
 
 function formatDateOnly(value?: string) {
@@ -98,10 +108,12 @@ function formatDateOnly(value?: string) {
     return "-";
   }
 
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit"
-  }).format(new Date(value));
+  const date = new Date(value);
+  const year = String(date.getFullYear()).slice(-2);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}/${month}/${day}`;
 }
 
 function getNextSessionTitle(sessions: SessionRecord[]) {
@@ -342,6 +354,28 @@ function AutoThemeIcon() {
   );
 }
 
+function PaceDialIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path
+        d="M5 14a7 7 0 1 1 14 0"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M12 13.8 15.8 10"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+      <circle cx="12" cy="14" r="1.2" fill="currentColor" />
+    </svg>
+  );
+}
+
 export function AppDashboard({ user }: { user: User }) {
   const router = useRouter();
   const streamRef = useRef<HTMLDivElement | null>(null);
@@ -378,6 +412,8 @@ export function AppDashboard({ user }: { user: User }) {
   const [modePickerScrollTop, setModePickerScrollTop] = useState(0);
   const [modePickerScrolling, setModePickerScrolling] = useState(false);
   const [expandedThinkingIds, setExpandedThinkingIds] = useState<string[]>([]);
+  const [paceBusy, setPaceBusy] = useState(false);
+  const [pacePanelOpen, setPacePanelOpen] = useState(false);
 
   const activeSessionMeta =
     sessions.find((session) => session.id === selectedSessionId) ?? activeSession;
@@ -385,6 +421,8 @@ export function AppDashboard({ user }: { user: User }) {
   const completedCount = completedSessions.length;
   const lastMessage = activeSession?.messages.at(-1);
   const activeSessionId = activeSession?.id;
+  const activeSessionPace = normalizeSessionPace(activeSession?.pace ?? DEFAULT_SESSION_PACE);
+  const activeSessionPaceMeta = getSessionPaceMeta(activeSessionPace);
   const activeSessionProgress = activeSession ? estimateSessionProgress(activeSession) : null;
   const progressCard = activeSessionProgress ? (
     <div
@@ -396,7 +434,6 @@ export function AppDashboard({ user }: { user: User }) {
           <strong>{activeSessionProgress.phaseLabel}</strong>
           <p>{activeSessionProgress.summary}</p>
         </div>
-        <span>{activeSessionProgress.milestoneLabel}</span>
       </div>
       <div
         aria-valuemax={100}
@@ -411,8 +448,8 @@ export function AppDashboard({ user }: { user: User }) {
         />
       </div>
       <div className="session-progress-foot">
-        <span>{activeSessionProgress.percent}%</span>
-        <span>{activeSessionProgress.detailLabel}</span>
+        <span className="session-progress-detail">{activeSessionProgress.detailLabel}</span>
+        <span className="session-progress-percent">{activeSessionProgress.percent}%</span>
       </div>
     </div>
   ) : null;
@@ -629,6 +666,24 @@ export function AppDashboard({ user }: { user: User }) {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!pacePanelOpen) {
+      return;
+    }
+
+    function handleWindowPointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || target.closest("[data-pace-control-root]")) {
+        return;
+      }
+
+      setPacePanelOpen(false);
+    }
+
+    window.addEventListener("pointerdown", handleWindowPointerDown);
+    return () => window.removeEventListener("pointerdown", handleWindowPointerDown);
+  }, [pacePanelOpen]);
 
   function stopModePickerSnapAnimation() {
     if (modePickerSnapFrameRef.current) {
@@ -982,6 +1037,61 @@ export function AppDashboard({ user }: { user: User }) {
     }
   }
 
+  async function updateSessionPaceValue(nextPace: SessionPace) {
+    if (!activeSession || paceBusy || normalizeSessionPace(activeSession.pace) === nextPace) {
+      return;
+    }
+
+    const previousPace = normalizeSessionPace(activeSession.pace);
+
+    setPaceBusy(true);
+    setNotice("");
+    setActiveSession((current) => (current ? { ...current, pace: nextPace } : current));
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === activeSession.id ? { ...session, pace: nextPace } : session
+      )
+    );
+
+    try {
+      const response = await fetch(`/api/sessions/${activeSession.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pace: nextPace })
+      });
+      const payload = (await response.json()) as { error?: string; session?: SessionDetail };
+
+      if (!response.ok || !payload.session) {
+        setActiveSession((current) => (current ? { ...current, pace: previousPace } : current));
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === activeSession.id ? { ...session, pace: previousPace } : session
+          )
+        );
+        setNotice(payload.error ?? "速度更新失败");
+        return;
+      }
+
+      setActiveSession(payload.session);
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === payload.session?.id
+            ? {
+                ...session,
+                pace: payload.session.pace,
+                updatedAt: payload.session.updatedAt,
+                messageCount: payload.session.messageCount,
+                riskLevel: payload.session.riskLevel,
+                redactedSummary: payload.session.redactedSummary
+              }
+            : session
+        )
+      );
+    } finally {
+      setPaceBusy(false);
+    }
+  }
+
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -1265,14 +1375,23 @@ export function AppDashboard({ user }: { user: User }) {
       const response = await fetch(`/api/sessions/${targetSession.id}/complete`, {
         method: "POST"
       });
-      const payload = (await response.json()) as {
-        error?: string;
-        supervisionCreated?: boolean;
-        alreadyCompleted?: boolean;
-      };
+      const raw = await response.text();
+      const payload = raw
+        ? (JSON.parse(raw) as {
+            error?: string;
+            supervisionCreated?: boolean;
+            alreadyCompleted?: boolean;
+          })
+        : {};
 
       if (!response.ok) {
-        setNotice(payload.error ?? "结束失败");
+        if (payload.error === "SESSION_COMPLETING") {
+          setNotice("这段会谈正在收尾处理中，请稍等片刻后刷新查看状态。");
+        } else if (payload.error === "NOT_FOUND") {
+          setNotice("这段会谈不存在，可能已经被删除。");
+        } else {
+          setNotice(payload.error ?? "结束失败");
+        }
         return;
       }
 
@@ -1288,9 +1407,20 @@ export function AppDashboard({ user }: { user: User }) {
       }
       await loadSessions(targetSession.id);
       await loadJournals();
+    } catch {
+      setNotice("结束会谈时出现异常，请稍后重试。");
     } finally {
       setBusy(false);
     }
+  }
+
+  function moveCompleteModalToDeleteFlow() {
+    if (!sessionToComplete || busy) {
+      return;
+    }
+
+    setSessionToDelete(sessionToComplete);
+    setSessionToComplete(null);
   }
 
   async function openSession(sessionId: string) {
@@ -1505,6 +1635,53 @@ export function AppDashboard({ user }: { user: User }) {
                   <div className="chat-stage-session-meta">
                     <div className="header-session-signals chat-stage-session-signals">
                       <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
+                      {activeSession.status === "active" ? (
+                        <div
+                          className={`pace-control${pacePanelOpen ? " is-open" : ""}`}
+                          data-pace-control-root="true"
+                        >
+                          <button
+                            aria-expanded={pacePanelOpen}
+                            aria-haspopup="dialog"
+                            aria-label={`对话速度，当前${activeSessionPaceMeta.label}`}
+                            className="signal-pill pace-icon-button"
+                            disabled={paceBusy || busy}
+                            onClick={() => setPacePanelOpen((current) => !current)}
+                            type="button"
+                          >
+                            <PaceDialIcon />
+                            <span>{activeSessionPaceMeta.label}</span>
+                          </button>
+                          {pacePanelOpen ? (
+                            <div className="pace-popover" role="dialog" aria-label="对话速度设置">
+                              <p className="pace-popover-title">对话速度</p>
+                              <div className="pace-popover-options" role="tablist" aria-label="选择对话速度">
+                                {SESSION_PACE_CATALOG.map((pace) => (
+                                  <button
+                                    aria-selected={activeSessionPace === pace.value}
+                                    className={
+                                      activeSessionPace === pace.value
+                                        ? "pace-popover-option is-active"
+                                        : "pace-popover-option"
+                                    }
+                                    disabled={paceBusy || busy}
+                                    key={pace.value}
+                                    onClick={() => {
+                                      void updateSessionPaceValue(pace.value);
+                                      setPacePanelOpen(false);
+                                    }}
+                                    role="tab"
+                                    type="button"
+                                  >
+                                    <strong>{pace.label}</strong>
+                                    <span>{pace.description}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
                     </div>
                   </div>
@@ -1852,6 +2029,19 @@ export function AppDashboard({ user }: { user: User }) {
                   <strong>{sessionToComplete.title}</strong>
                   <span>{normalizeSessionMode(sessionToComplete.mode)}</span>
                   <span>{sessionToComplete.messageCount} 条消息</span>
+                </div>
+                <div className="modal-inline-alert">
+                  <div className="modal-inline-alert-copy">
+                    <strong>如果这段会谈不需要保留</strong>
+                    <p>可以直接删除。删除会清理消息、关联督导记录与派生手帐，且无法恢复。</p>
+                  </div>
+                  <IconButton
+                    className="ghost-button danger-button modal-inline-delete-button"
+                    label="删除这段会谈"
+                    onClick={moveCompleteModalToDeleteFlow}
+                  >
+                    <TrashIcon />
+                  </IconButton>
                 </div>
                 <div className="modal-actions">
                   <button className="ghost-button" disabled={busy} onClick={() => setSessionToComplete(null)} type="button">

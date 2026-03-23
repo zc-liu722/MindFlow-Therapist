@@ -7,6 +7,7 @@ import { readDb, writeDb } from "@/lib/db";
 import { buildTherapyJournal } from "@/lib/ai";
 import { generateSupervisionArtifacts, generateTherapyReply } from "@/lib/anthropic";
 import { normalizeSessionMode } from "@/lib/session-modes";
+import { DEFAULT_SESSION_PACE, normalizeSessionPace } from "@/lib/session-pace";
 import type {
   AnalyticsEventRecord,
   ChatMessage,
@@ -62,7 +63,8 @@ export async function listSessionsForUser(userId: string) {
     .filter((session) => session.userId === userId)
     .map((session) => ({
       ...session,
-      mode: normalizeSessionMode(session.mode)
+      mode: normalizeSessionMode(session.mode),
+      pace: normalizeSessionPace(session.pace)
     }))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
@@ -78,6 +80,7 @@ export async function getSessionForUser(userId: string, sessionId: string) {
   return {
     ...session,
     mode: normalizeSessionMode(session.mode),
+    pace: normalizeSessionPace(session.pace),
     messageCount: visibleMessages(parseTranscript(session)).length,
     messages: visibleMessages(parseTranscript(session))
   };
@@ -144,9 +147,10 @@ function buildSessionContextMessages(input: {
 
 export async function createSession(
   user: UserRecord,
-  input: { title: string; mode: string }
+  input: { title: string; mode: string; pace?: string }
 ) {
   const normalizedMode = normalizeSessionMode(input.mode);
+  const normalizedPace = normalizeSessionPace(input.pace);
   await preloadTherapistCoreRule();
   const modeRules = await preloadModeRules(normalizedMode);
   const db = await readDb();
@@ -165,6 +169,7 @@ export async function createSession(
     userId: user.id,
     title: input.title.trim(),
     mode: normalizedMode,
+    pace: normalizedPace,
     status: "active",
     autoSupervision: true,
     createdAt: now,
@@ -181,7 +186,12 @@ export async function createSession(
   await writeDb((draft) => {
     draft.therapySessions.push(session);
   });
-  await logEvent(user, "session_created", { autoSupervision: true }, session.id);
+  await logEvent(
+    user,
+    "session_created",
+    { autoSupervision: true, pace: normalizedPace },
+    session.id
+  );
   return session;
 }
 
@@ -300,6 +310,7 @@ export async function appendMessage(
   const assistantOutput = await generateTherapyReply({
     title: session.title,
     mode: session.mode,
+    pace: normalizeSessionPace(session.pace),
     messages: draftMessages
   });
   const nextMessages = [...draftMessages, assistantOutput.message];
@@ -341,6 +352,34 @@ export async function appendMessage(
   };
 }
 
+export async function updateSessionPace(
+  user: UserRecord,
+  sessionId: string,
+  pace: string
+) {
+  const normalizedPace = normalizeSessionPace(pace);
+  let updated = false;
+
+  await writeDb((draft) => {
+    const session = draft.therapySessions.find(
+      (item) => item.id === sessionId && item.userId === user.id
+    );
+
+    if (!session) {
+      return;
+    }
+
+    session.pace = normalizedPace;
+    updated = true;
+  });
+
+  if (!updated) {
+    throw new Error("NOT_FOUND");
+  }
+
+  return getSessionForUser(user.id, sessionId);
+}
+
 export async function appendMessageStream(
   user: UserRecord,
   sessionId: string,
@@ -378,6 +417,7 @@ export async function appendMessageStream(
   const assistantOutput = await generateTherapyReply({
     title: session.title,
     mode: session.mode,
+    pace: normalizeSessionPace(session.pace),
     messages: draftMessages,
     onThinkingDelta(delta, rawThinking) {
       handlers?.onThinkingDelta?.({
@@ -408,6 +448,7 @@ export async function appendMessageStream(
     mutableSession.redactedSummary = `近期聚焦 ${assistantOutput.themes.join("、")}。`;
     mutableSession.messageCount = visibleMessages(nextMessages).length;
     mutableSession.riskLevel = assistantOutput.riskLevel;
+    mutableSession.pace = normalizeSessionPace(mutableSession.pace ?? DEFAULT_SESSION_PACE);
     persisted = true;
   });
 
@@ -418,7 +459,11 @@ export async function appendMessageStream(
   await logEvent(
     user,
     "message_sent",
-    { messageLength: userContent.length, riskLevel: assistantOutput.riskLevel },
+    {
+      messageLength: userContent.length,
+      riskLevel: assistantOutput.riskLevel,
+      pace: normalizeSessionPace(session.pace)
+    },
     sessionId
   );
 
