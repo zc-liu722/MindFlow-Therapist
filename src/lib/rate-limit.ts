@@ -5,9 +5,13 @@ function pruneBucket(values: number[], now: number, windowMs: number) {
 }
 
 export function getClientIp(request: Request) {
+  if (process.env.TRUST_PROXY_HEADERS !== "true") {
+    return null;
+  }
+
   const forwardedFor = request.headers.get("x-forwarded-for");
   if (forwardedFor) {
-    return forwardedFor.split(",")[0]?.trim() || "unknown";
+    return forwardedFor.split(",")[0]?.trim() || null;
   }
 
   const realIp = request.headers.get("x-real-ip");
@@ -15,7 +19,7 @@ export function getClientIp(request: Request) {
     return realIp.trim();
   }
 
-  return "unknown";
+  return null;
 }
 
 export function assertRateLimit(input: {

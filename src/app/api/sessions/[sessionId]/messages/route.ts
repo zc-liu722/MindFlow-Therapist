@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { requireRole } from "@/lib/auth";
 import { AnthropicConfigError, AnthropicRequestError } from "@/lib/anthropic";
 import { appendMessageStream } from "@/lib/domain";
-import { assertRateLimit, getClientIp } from "@/lib/rate-limit";
+import { assertRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,18 +12,41 @@ function toSseEvent(event: string, payload: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
+function toClientSafeErrorMessage(error: unknown) {
+  if (error instanceof AnthropicConfigError) {
+    return "AI 服务暂时不可用，请稍后再试。";
+  }
+
+  if (error instanceof AnthropicRequestError) {
+    return "AI 回复暂时失败，请稍后再试。";
+  }
+
+  const message = error instanceof Error ? error.message : "发送失败";
+  if (
+    message === "NOT_FOUND" ||
+    message === "SESSION_CLOSED" ||
+    message === "RATE_LIMITED" ||
+    message === "UNAUTHORIZED" ||
+    message === "FORBIDDEN"
+  ) {
+    return message;
+  }
+
+  return "消息发送失败，请稍后再试。";
+}
+
 export async function POST(
   request: Request,
   context: { params: Promise<{ sessionId: string }> }
 ) {
   try {
+    const user = await requireRole("user");
+    const { sessionId } = await context.params;
     assertRateLimit({
-      key: `session-message:${getClientIp(request)}`,
+      key: `session-message:user:${user.id}:${sessionId}`,
       limit: 30,
       windowMs: 60_000
     });
-    const user = await requireRole("user");
-    const { sessionId } = await context.params;
     const body = (await request.json()) as { content?: string };
 
     if (!body.content?.trim()) {
@@ -46,8 +69,9 @@ export async function POST(
 
           controller.enqueue(encoder.encode(toSseEvent("done", result)));
         } catch (error) {
-          const message = error instanceof Error ? error.message : "发送失败";
-          controller.enqueue(encoder.encode(toSseEvent("error", { error: message })));
+          controller.enqueue(
+            encoder.encode(toSseEvent("error", { error: toClientSafeErrorMessage(error) }))
+          );
         } finally {
           controller.close();
         }

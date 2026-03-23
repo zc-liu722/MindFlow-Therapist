@@ -261,6 +261,18 @@ export function AuthPanel() {
       <div className="landing-motion landing-motion-mist" />
       <div className="landing-motion landing-motion-orbit" />
       <div className="landing-motion landing-motion-beam" />
+      <div className="landing-ribbon landing-ribbon-left" />
+      <div className="landing-ribbon landing-ribbon-right" />
+      <div className="landing-prism landing-prism-top" />
+      <div className="landing-prism landing-prism-bottom" />
+      <div className="landing-particles" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+        <span />
+        <span />
+        <span />
+      </div>
       <div className="landing-glow landing-glow-left" />
       <div className="landing-glow landing-glow-right" />
       <div className="landing-gridline" />

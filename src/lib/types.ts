@@ -57,6 +57,8 @@ export interface TherapySessionRecord {
   riskLevel: RiskLevel;
   transcript: EncryptedBlob;
   supervisionId?: string;
+  completionLockId?: string;
+  completionLockAt?: string;
 }
 
 export interface TherapyJournalRecord {

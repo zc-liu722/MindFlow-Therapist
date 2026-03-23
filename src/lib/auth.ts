@@ -38,6 +38,20 @@ function createPasswordMaterial(password?: string) {
   return createPasswordHash(value);
 }
 
+function getAdminInviteCode() {
+  const value = process.env.ADMIN_INVITE_CODE?.trim();
+
+  if (!value) {
+    throw new Error("ADMIN_INVITE_CODE_MISSING");
+  }
+
+  if (value === "owner-demo-only" || value === "change-me") {
+    throw new Error("ADMIN_INVITE_CODE_INSECURE");
+  }
+
+  return value;
+}
+
 export async function registerUser(input: {
   username: string;
   displayName?: string;
@@ -62,7 +76,7 @@ export async function registerUser(input: {
   }
 
   if (role === "admin") {
-    const expectedCode = process.env.ADMIN_INVITE_CODE ?? "owner-demo-only";
+    const expectedCode = getAdminInviteCode();
     if (input.adminInviteCode !== expectedCode) {
       throw new Error("管理员邀请码不正确");
     }
@@ -115,7 +129,7 @@ export async function loginUser(
 
   const existingUser = db.users.find((item) => item.username === username);
   if (!existingUser) {
-    throw new Error("USER_NOT_FOUND");
+    throw new Error("INVALID_CREDENTIALS");
   }
 
   if (requiredRole && existingUser.role !== requiredRole) {

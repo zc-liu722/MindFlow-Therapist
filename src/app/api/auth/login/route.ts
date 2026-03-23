@@ -22,11 +22,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请输入用户名" }, { status: 400 });
     }
 
-    assertRateLimit({
-      key: `auth-login:ip:${getClientIp(request)}`,
-      limit: 10,
-      windowMs: 60_000
-    });
+    const clientIp = getClientIp(request);
+    if (clientIp) {
+      assertRateLimit({
+        key: `auth-login:ip:${clientIp}`,
+        limit: 10,
+        windowMs: 60_000
+      });
+    }
     assertRateLimit({
       key: `auth-login:user:${body.username.trim().toLowerCase()}`,
       limit: 8,
@@ -64,7 +67,7 @@ export async function POST(request: Request) {
     const status =
       message === "FORBIDDEN_ROLE"
         ? 403
-        : message === "USER_NOT_FOUND" || message === "INVALID_CREDENTIALS"
+        : message === "INVALID_CREDENTIALS"
           ? 401
           : message === "RATE_LIMITED"
             ? 429

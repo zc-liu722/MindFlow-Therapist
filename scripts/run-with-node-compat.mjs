@@ -14,11 +14,7 @@ function withShimNodeOptions() {
 }
 
 function resolveEntrypoint(command) {
-  if (command === "start") {
-    return path.resolve(process.cwd(), ".next/standalone/server.js");
-  }
-
-  if (command === "dev" || command === "build") {
+  if (command === "dev" || command === "build" || command === "start") {
     return require.resolve("next/dist/bin/next");
   }
 
@@ -49,7 +45,7 @@ if (!entrypoint) {
 
 const child = spawn(
   process.execPath,
-  [entrypoint, ...(command === "start" ? [] : [command]), ...process.argv.slice(3)],
+  [entrypoint, command, ...process.argv.slice(3)],
   {
     stdio: "inherit",
     env: {

@@ -87,9 +87,7 @@ COOKIE_SECURE=false
 ## 目录说明
 
 - `src/`：Next.js 前后端主实现
-- `public/`：静态资源
 - `data/db.json`：本地开发数据文件
-- `server.mjs`：旧版自托管入口，当前不作为推荐线上入口
 
 ## 备注
 

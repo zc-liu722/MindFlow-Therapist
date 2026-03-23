@@ -12,6 +12,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
+import { estimateSessionProgress } from "@/lib/session-progress";
 import {
   DEFAULT_SESSION_MODE,
   SESSION_MODE_CATALOG,
@@ -73,6 +74,7 @@ const THEME_STORAGE_KEY = "mindflow-theme-preference";
 const MODE_PICKER_ITEM_HEIGHT = 76;
 const MODE_PICKER_VISIBLE_ROWS = 3;
 const MODE_PICKER_SPACER_HEIGHT = (MODE_PICKER_ITEM_HEIGHT * (MODE_PICKER_VISIBLE_ROWS - 1)) / 2;
+const MODE_PICKER_MAX_DISTANCE = 2.75;
 
 function formatDateTime(value?: string) {
   if (!value) {
@@ -110,18 +112,26 @@ function getNextSessionTitle(sessions: SessionRecord[]) {
   return `第${highestIndex + 1}次会谈`;
 }
 
-function getModeWheelOptionStyle(index: number, selectedIndex: number) {
-  const distance = index - selectedIndex;
+function getModeWheelOptionStyle(index: number, scrollTop: number) {
+  const virtualIndex = scrollTop / MODE_PICKER_ITEM_HEIGHT;
+  const distance = index - virtualIndex;
   const absoluteDistance = Math.abs(distance);
-  const limitedDistance = Math.min(absoluteDistance, 3);
-  const scale = 1 - limitedDistance * 0.08;
-  const translateY = distance * 2;
-  const rotateX = distance * -18;
-  const opacity = 1 - limitedDistance * 0.22;
+  const limitedDistance = Math.min(absoluteDistance, MODE_PICKER_MAX_DISTANCE);
+  const easedFocus = 1 - limitedDistance / MODE_PICKER_MAX_DISTANCE;
+  const scale = 0.82 + easedFocus * 0.24;
+  const translateY = distance * (10 + limitedDistance * 3.5);
+  const rotateX = distance * -22;
+  const opacity = 0.18 + easedFocus * 0.82;
+  const blur = limitedDistance * 0.9;
+  const saturate = 0.5 + easedFocus * 0.7;
+  const brightness = 0.68 + easedFocus * 0.38;
+  const zIndex = Math.round((MODE_PICKER_MAX_DISTANCE - limitedDistance) * 10);
 
   return {
-    opacity: Math.max(opacity, 0.24),
-    transform: `perspective(720px) rotateX(${rotateX}deg) scale(${scale}) translateY(${translateY}px)`
+    filter: `blur(${blur}px) saturate(${saturate}) brightness(${brightness})`,
+    opacity: Math.max(opacity, 0.12),
+    transform: `perspective(960px) translateY(${translateY}px) rotateX(${rotateX}deg) scale(${scale})`,
+    zIndex
   };
 }
 
@@ -139,44 +149,8 @@ function getTypingStep(targetLength: number, currentLength: number) {
   return 1;
 }
 
-function clampText(value: string, maxLength: number) {
-  if (value.length <= maxLength) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
-}
-
-function cleanThinkingSegment(value: string) {
-  return value
-    .replace(/[#>*`_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/[：:]\s*$/g, "")
-    .trim();
-}
-
-function normalizeThinkingLine(value: string) {
-  return value
-    .replace(/^(我在|我会|我先|先|正在|需要先|需要|考虑先|考虑|想先)/u, "")
-    .replace(/^(回应时|回复时|这里|此处)/u, "")
-    .trim();
-}
-
 function formatThinkingLine(thinking?: string) {
-  const fallbackAction = "梳理你刚刚提到的重点";
-
-  if (!thinking?.trim()) {
-    return `在${fallbackAction}`;
-  }
-
-  const segments = thinking
-    .split(/[\n\r]+|(?<=[。！？；;])\s*/u)
-    .map(cleanThinkingSegment)
-    .filter(Boolean);
-
-  const latestSegment = [...segments].reverse().find((segment) => segment.length >= 2) ?? fallbackAction;
-  const normalized = normalizeThinkingLine(latestSegment) || latestSegment;
-
-  return clampText(normalized, 28);
+  return thinking?.trim() || "梳理你刚刚提到的重点";
 }
 
 function parseSseChunk(chunk: string) {
@@ -345,6 +319,7 @@ function AutoThemeIcon() {
 export function AppDashboard({ user }: { user: User }) {
   const router = useRouter();
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionRequestRef = useRef(0);
   const initialLoadRef = useRef(false);
   const modePickerRef = useRef<HTMLDivElement | null>(null);
@@ -364,17 +339,22 @@ export function AppDashboard({ user }: { user: User }) {
   const [autoSupervision, setAutoSupervision] = useState(true);
   const [messageInput, setMessageInput] = useState("");
   const [isComposerComposing, setIsComposerComposing] = useState(false);
+  const [sessionToComplete, setSessionToComplete] = useState<SessionRecord | null>(null);
   const [sessionToDelete, setSessionToDelete] = useState<SessionRecord | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [portalReady, setPortalReady] = useState(false);
+  const [modePickerScrollTop, setModePickerScrollTop] = useState(0);
+  const [modePickerScrolling, setModePickerScrolling] = useState(false);
 
   const activeSessionMeta =
     sessions.find((session) => session.id === selectedSessionId) ?? activeSession;
   const completedSessions = sessions.filter((session) => session.status === "completed");
   const completedCount = completedSessions.length;
   const lastMessage = activeSession?.messages.at(-1);
+  const activeSessionId = activeSession?.id;
+  const activeSessionProgress = activeSession ? estimateSessionProgress(activeSession) : null;
 
   useEffect(() => {
     if (!createPanelOpen) {
@@ -396,11 +376,31 @@ export function AppDashboard({ user }: { user: User }) {
       top: selectedIndex * MODE_PICKER_ITEM_HEIGHT,
       behavior: "smooth"
     });
+    setModePickerScrollTop(selectedIndex * MODE_PICKER_ITEM_HEIGHT);
   }, [createPanelOpen, draftMode]);
 
   useEffect(() => {
     setPortalReady(true);
   }, []);
+
+  useEffect(() => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "auto";
+    const computed = window.getComputedStyle(textarea);
+    const lineHeight = Number.parseFloat(computed.lineHeight) || 24;
+    const maxHeight =
+      lineHeight * 5 +
+      Number.parseFloat(computed.paddingTop || "0") +
+      Number.parseFloat(computed.paddingBottom || "0");
+    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
+
+    textarea.style.height = `${Math.max(nextHeight, lineHeight)}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [messageInput, activeSessionId]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -473,8 +473,10 @@ export function AppDashboard({ user }: { user: User }) {
       return;
     }
 
+    const nextTop = index * MODE_PICKER_ITEM_HEIGHT;
+    setModePickerScrollTop(nextTop);
     picker.scrollTo({
-      top: index * MODE_PICKER_ITEM_HEIGHT,
+      top: nextTop,
       behavior
     });
   }
@@ -495,6 +497,9 @@ export function AppDashboard({ user }: { user: User }) {
       return;
     }
 
+    setModePickerScrollTop(picker.scrollTop);
+    setModePickerScrolling(true);
+
     const nextIndex = Math.max(
       0,
       Math.min(
@@ -512,8 +517,9 @@ export function AppDashboard({ user }: { user: User }) {
     }
 
     modePickerTimeoutRef.current = window.setTimeout(() => {
+      setModePickerScrolling(false);
       snapModePicker(nextIndex);
-    }, 120);
+    }, 110);
   }
 
   const loadSessionDetail = useCallback(async (sessionId: string) => {
@@ -935,15 +941,16 @@ export function AppDashboard({ user }: { user: User }) {
   }
 
   async function completeCurrentSession() {
-    if (!activeSession || busy) {
+    if (!sessionToComplete || busy) {
       return;
     }
 
+    const targetSession = sessionToComplete;
     setBusy(true);
     setNotice("");
 
     try {
-      const response = await fetch(`/api/sessions/${activeSession.id}/complete`, {
+      const response = await fetch(`/api/sessions/${targetSession.id}/complete`, {
         method: "POST"
       });
       const payload = (await response.json()) as {
@@ -957,6 +964,7 @@ export function AppDashboard({ user }: { user: User }) {
         return;
       }
 
+      setSessionToComplete(null);
       if (payload.alreadyCompleted) {
         setNotice("本次会谈已处于结束状态。");
       } else {
@@ -966,7 +974,7 @@ export function AppDashboard({ user }: { user: User }) {
             : "本次会谈已结束。"
         );
       }
-      await loadSessions(activeSession.id);
+      await loadSessions(targetSession.id);
       await loadJournals();
     } finally {
       setBusy(false);
@@ -1080,6 +1088,9 @@ export function AppDashboard({ user }: { user: User }) {
     <main className="app-shell">
       <div className="app-aurora app-aurora-left" />
       <div className="app-aurora app-aurora-right" />
+      <div className="app-light-trail app-light-trail-left" />
+      <div className="app-light-trail app-light-trail-right" />
+      <div className="app-pulse-grid" />
       <div className="app-grid app-grid-immersive">
         <aside className={sidebarOpen ? "studio-rail studio-rail-overlay is-open" : "studio-rail studio-rail-overlay"}>
           <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
@@ -1162,7 +1173,7 @@ export function AppDashboard({ user }: { user: User }) {
           </div>
         </aside>
 
-        <section className="experience-shell experience-shell-full">
+        <section className={sidebarOpen ? "experience-shell experience-shell-full sidebar-stage is-sidebar-open" : "experience-shell experience-shell-full sidebar-stage"}>
           <header className="immersion-header">
             <div className="header-utility-row header-utility-row-main">
               <IconButton className="ghost-button sidebar-toggle" label="打开侧边栏" onClick={() => setSidebarOpen(true)}>
@@ -1172,9 +1183,9 @@ export function AppDashboard({ user }: { user: User }) {
                 {activeSession ? (
                   <>
                     <h1>{activeSession.title}</h1>
-                    <div className="signal-row">
-                      <span className="signal-pill">{normalizeSessionMode(activeSession.mode)}</span>
-                      <span className="signal-pill">{formatDateTime(activeSession.updatedAt)}</span>
+                    <div className="header-session-signals">
+                      <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
+                      <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
                     </div>
                   </>
                 ) : (
@@ -1204,27 +1215,82 @@ export function AppDashboard({ user }: { user: User }) {
 
           {notice ? <div className="notice">{notice}</div> : null}
 
-          <div className="view-stage" key={view}>
+          <nav className="mobile-view-switch" aria-label="移动端视图切换">
+            {sessionTabs.map((item) => (
+              <button
+                aria-label={item.label}
+                aria-pressed={view === item.key}
+                className={view === item.key ? "mobile-view-chip is-active" : "mobile-view-chip"}
+                key={item.key}
+                onClick={() => handleViewChange(item.key)}
+                type="button"
+              >
+                <span className="mobile-view-chip-icon">{item.icon}</span>
+                <span className="mobile-view-chip-label">{item.label}</span>
+                {item.count !== undefined ? <span className="mobile-view-chip-count">{item.count}</span> : null}
+              </button>
+            ))}
+          </nav>
+
+          <div className={`view-stage view-stage-${view}`} key={view}>
+            <div className="view-stage-ornaments" aria-hidden="true">
+              <span className="view-orb view-orb-a" />
+              <span className="view-orb view-orb-b" />
+              <span className="view-orb view-orb-c" />
+              <span className="view-streak view-streak-a" />
+              <span className="view-streak view-streak-b" />
+            </div>
             {view === "chat" ? (
               <section className="immersion-layout immersion-layout-full">
                 <section className="chat-stage">
                 {activeSession ? (
                   <>
-                    <div className="notice">
-                      隐私提示：你的消息会在服务端加密存储。为生成回复，必要的当前对话与历史上下文会发送给 Anthropic；如不接受这一边界，请停止输入敏感信息。
-                    </div>
-
                     <div className="chat-stage-head">
-                      <span className={`session-status session-status-${activeSession.status}`}>
-                        {activeSession.status === "active" ? "进行中" : "已结束"}
-                      </span>
+                      <div className="chat-stage-head-main">
+                        {activeSessionProgress ? (
+                          <div
+                            aria-label={`会谈进度 ${activeSessionProgress.percent}%`}
+                            className="session-progress-card"
+                          >
+                            <div className="session-progress-meta">
+                              <div>
+                                <strong>{activeSessionProgress.phaseLabel}</strong>
+                                <p>{activeSessionProgress.summary}</p>
+                              </div>
+                              <span>{activeSessionProgress.milestoneLabel}</span>
+                            </div>
+                            <div
+                              aria-valuemax={100}
+                              aria-valuemin={0}
+                              aria-valuenow={activeSessionProgress.percent}
+                              className="session-progress-track"
+                              role="progressbar"
+                            >
+                              <span
+                                className="session-progress-fill"
+                                style={{ width: `${activeSessionProgress.percent}%` }}
+                              />
+                            </div>
+                            <div className="session-progress-steps" aria-hidden="true">
+                              <span className={activeSessionProgress.percent >= 1 ? "is-active" : ""}>开始</span>
+                              <span className={activeSessionProgress.percent >= 24 ? "is-active" : ""}>展开</span>
+                              <span className={activeSessionProgress.percent >= 60 ? "is-active" : ""}>整理</span>
+                              <span className={activeSessionProgress.percent >= 86 ? "is-active" : ""}>收束</span>
+                            </div>
+                            <div className="session-progress-foot">
+                              <span>{activeSessionProgress.percent}%</span>
+                              <span>{activeSessionProgress.detailLabel}</span>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
 
                       <div className="stage-actions">
                         {activeSession.status === "active" ? (
                           <button
                             className="primary-button"
                             disabled={busy}
-                            onClick={completeCurrentSession}
+                            onClick={() => setSessionToComplete(activeSessionMeta ?? activeSession)}
                             type="button"
                           >
                             结束
@@ -1246,10 +1312,6 @@ export function AppDashboard({ user }: { user: User }) {
                     </div>
 
                     <div className="message-stream" ref={streamRef}>
-                      {activeSession.messages.length === 0 ? (
-                        <div className="empty-state empty-chat">开始这次对话</div>
-                      ) : null}
-
                       {activeSession.messages.map((message) => (
                         <article
                           key={message.id}
@@ -1313,17 +1375,18 @@ export function AppDashboard({ user }: { user: User }) {
 
                     {activeSession.status === "active" ? (
                       <form className="composer composer-stage" onSubmit={sendMessage}>
-                        <textarea
-                          placeholder="输入消息..."
-                          rows={4}
-                          value={messageInput}
-                          onChange={(event) => setMessageInput(event.target.value)}
-                          onCompositionStart={() => setIsComposerComposing(true)}
-                          onCompositionEnd={() => setIsComposerComposing(false)}
-                          onKeyDown={handleComposerKeyDown}
-                        />
-                        <div className="composer-actions">
-                          <button className="primary-button" disabled={busy} type="submit">
+                        <div className="composer-input-shell">
+                          <textarea
+                            ref={composerTextareaRef}
+                            placeholder="输入消息..."
+                            rows={1}
+                            value={messageInput}
+                            onChange={(event) => setMessageInput(event.target.value)}
+                            onCompositionStart={() => setIsComposerComposing(true)}
+                            onCompositionEnd={() => setIsComposerComposing(false)}
+                            onKeyDown={handleComposerKeyDown}
+                          />
+                          <button className="primary-button composer-submit" disabled={busy} type="submit">
                             {busy ? "正在回复..." : "发送"}
                           </button>
                         </div>
@@ -1333,7 +1396,7 @@ export function AppDashboard({ user }: { user: User }) {
                     )}
                   </>
                 ) : (
-                  <div className="empty-state empty-chat">点击右上角新建会谈</div>
+                  <div className="empty-state empty-chat empty-chat-empty-session">点击右上角新建会谈</div>
                 )}
                 </section>
               </section>
@@ -1473,6 +1536,38 @@ export function AppDashboard({ user }: { user: User }) {
           )
         : null}
 
+      {portalReady && sessionToComplete
+        ? createPortal(
+            <div className="modal-shell" role="dialog" aria-modal="true" aria-labelledby="complete-session-title">
+              <div className="modal-backdrop" onClick={() => setSessionToComplete(null)} />
+              <div className="modal-card">
+                <span className="eyebrow">session close</span>
+                <h3 id="complete-session-title">确认结束这段会谈？</h3>
+                <p>
+                  结束后将停止继续发送消息。
+                  {sessionToComplete.autoSupervision
+                    ? "系统会自动启动一次督导复盘，请确认这是你想要的结束时点。"
+                    : "当前这段会谈未开启自动督导。"}
+                </p>
+                <div className="modal-session-brief">
+                  <strong>{sessionToComplete.title}</strong>
+                  <span>{normalizeSessionMode(sessionToComplete.mode)}</span>
+                  <span>{sessionToComplete.messageCount} 条消息</span>
+                </div>
+                <div className="modal-actions">
+                  <button className="ghost-button" disabled={busy} onClick={() => setSessionToComplete(null)} type="button">
+                    继续会谈
+                  </button>
+                  <button className="primary-button" disabled={busy} onClick={completeCurrentSession} type="button">
+                    {busy ? "正在结束..." : "确认结束"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
+
       {portalReady && createPanelOpen
         ? createPortal(
             <div className="modal-shell" role="dialog" aria-modal="true" aria-labelledby="create-session-title">
@@ -1495,7 +1590,7 @@ export function AppDashboard({ user }: { user: User }) {
                         <div
                           aria-activedescendant={`session-mode-${SESSION_MODE_OPTIONS.indexOf(draftMode)}`}
                           aria-label="选择会谈流派"
-                          className="mode-wheel-picker"
+                          className={modePickerScrolling ? "mode-wheel-picker is-scrolling" : "mode-wheel-picker"}
                           onScroll={handleModePickerScroll}
                           ref={modePickerRef}
                           role="listbox"
@@ -1513,7 +1608,7 @@ export function AppDashboard({ user }: { user: User }) {
                               id={`session-mode-${index}`}
                               key={mode.value}
                               onClick={() => selectModeByIndex(index)}
-                              style={getModeWheelOptionStyle(index, SESSION_MODE_OPTIONS.indexOf(draftMode))}
+                              style={getModeWheelOptionStyle(index, modePickerScrollTop)}
                               type="button"
                             >
                               <strong className="mode-wheel-option-label">{mode.shortLabel}</strong>

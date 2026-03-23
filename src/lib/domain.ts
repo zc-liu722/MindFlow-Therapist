@@ -346,7 +346,11 @@ export async function appendMessageStream(
   sessionId: string,
   userContent: string,
   handlers?: {
-    onThinkingDelta?: (payload: { delta: string; thinking: string }) => void;
+    onThinkingDelta?: (payload: {
+      delta: string;
+      thinking: string;
+      rawThinking: string;
+    }) => void;
     onTextDelta?: (payload: { delta: string; content: string }) => void;
   }
 ) {
@@ -375,8 +379,12 @@ export async function appendMessageStream(
     title: session.title,
     mode: session.mode,
     messages: draftMessages,
-    onThinkingDelta(delta, thinking) {
-      handlers?.onThinkingDelta?.({ delta, thinking });
+    onThinkingDelta(delta, rawThinking, liveSummary) {
+      handlers?.onThinkingDelta?.({
+        delta,
+        thinking: liveSummary,
+        rawThinking
+      });
     },
     onTextDelta(delta, content) {
       handlers?.onTextDelta?.({ delta, content });
@@ -428,6 +436,56 @@ function mergeJournalContent(previous: string | null, nextBlock: string) {
   return `${nextBlock}\n\n---\n\n${previous}`;
 }
 
+const COMPLETION_LOCK_TTL_MS = 10 * 60_000;
+
+async function acquireCompletionLock(userId: string, sessionId: string) {
+  const lockId = createId("completion_lock");
+  let acquired = false;
+  let sessionAlreadyCompleted = false;
+
+  await writeDb((draft) => {
+    const mutableSession = draft.therapySessions.find(
+      (item) => item.id === sessionId && item.userId === userId
+    );
+    if (!mutableSession) {
+      return;
+    }
+
+    if (mutableSession.status === "completed") {
+      sessionAlreadyCompleted = true;
+      return;
+    }
+
+    const lockAt = mutableSession.completionLockAt
+      ? new Date(mutableSession.completionLockAt).getTime()
+      : 0;
+    const lockExpired = !lockAt || Number.isNaN(lockAt) || Date.now() - lockAt > COMPLETION_LOCK_TTL_MS;
+    if (mutableSession.completionLockId && !lockExpired) {
+      return;
+    }
+
+    mutableSession.completionLockId = lockId;
+    mutableSession.completionLockAt = new Date().toISOString();
+    acquired = true;
+  });
+
+  return { acquired, lockId, sessionAlreadyCompleted };
+}
+
+async function releaseCompletionLock(userId: string, sessionId: string, lockId: string) {
+  await writeDb((draft) => {
+    const mutableSession = draft.therapySessions.find(
+      (item) => item.id === sessionId && item.userId === userId
+    );
+    if (!mutableSession || mutableSession.completionLockId !== lockId) {
+      return;
+    }
+
+    delete mutableSession.completionLockId;
+    delete mutableSession.completionLockAt;
+  });
+}
+
 export async function completeSession(user: UserRecord, sessionId: string) {
   const db = await readDb();
   const session = db.therapySessions.find(
@@ -446,145 +504,174 @@ export async function completeSession(user: UserRecord, sessionId: string) {
     };
   }
 
-  const messages = parseTranscript(session);
-  const therapyJournalDraft = buildTherapyJournal(messages, session.title);
-  const therapyJournalExisting = db.therapyJournals.find((item) => item.userId === user.id);
-  const mergedTherapy = mergeJournalContent(
-    therapyJournalExisting
-      ? decryptForUser(user.id, therapyJournalExisting.content)
-      : null,
-    therapyJournalDraft.content
-  );
-
-  const therapyJournal: TherapyJournalRecord = therapyJournalExisting ?? {
-    id: createId("therapy_journal"),
-    userId: user.id,
-    updatedAt: new Date().toISOString(),
-    content: encryptForUser(user.id, mergedTherapy),
-    redactedSummary: therapyJournalDraft.redactedSummary
-  };
-
-  const hasExistingTherapyJournal = Boolean(therapyJournalExisting);
-
-  let supervisionRun: SupervisionRunRecord | undefined;
-  let supervisionJournal: SupervisionJournalRecord | undefined;
-  let alreadyCompleted = false;
-
-  if (session.autoSupervision) {
-    const supervisionJournalExisting = db.supervisionJournals.find(
-      (item) => item.userId === user.id
-    );
-    const supervisionOutput = await generateSupervisionArtifacts({
-      sessionTitle: session.title,
-      messages,
-      supervisionJournal: supervisionJournalExisting
-        ? decryptForUser(user.id, supervisionJournalExisting.content)
-        : null
-    });
-    supervisionRun = {
-      id: createId("supervision"),
-      userId: user.id,
-      sessionId: session.id,
-      status: "completed",
-      createdAt: new Date().toISOString(),
-      completedAt: new Date().toISOString(),
-      transcript: encryptForUser(user.id, JSON.stringify(supervisionOutput.transcript)),
-      journalEntry: encryptForUser(user.id, supervisionOutput.journalEntry),
-      redactedSummary: supervisionOutput.redactedSummary,
-      journalEntryPreview: supervisionOutput.journalEntryPreview
-    };
-
-    const mergedSupervision = mergeJournalContent(
-      supervisionJournalExisting
-        ? decryptForUser(user.id, supervisionJournalExisting.content)
-        : null,
-      supervisionOutput.journalEntry
-    );
-
-    supervisionJournal = supervisionJournalExisting ?? {
-      id: createId("supervision_journal"),
-      userId: user.id,
-      updatedAt: new Date().toISOString(),
-      content: encryptForUser(user.id, mergedSupervision),
-      redactedSummary: supervisionOutput.redactedSummary
-    };
-
-    if (supervisionJournalExisting) {
-      supervisionJournal.updatedAt = new Date().toISOString();
-      supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
-      supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
-    }
-  }
-
-  if (therapyJournalExisting) {
-    therapyJournal.updatedAt = new Date().toISOString();
-    therapyJournal.content = encryptForUser(user.id, mergedTherapy);
-    therapyJournal.redactedSummary = therapyJournalDraft.redactedSummary;
-  }
-
-  await writeDb((draft) => {
-    const mutableSession = draft.therapySessions.find((item) => item.id === session.id);
-    if (!mutableSession) {
-      return;
-    }
-
-    if (mutableSession.status === "completed") {
-      alreadyCompleted = true;
-      return;
-    }
-
-    mutableSession.status = "completed";
-    mutableSession.completedAt = new Date().toISOString();
-    mutableSession.updatedAt = new Date().toISOString();
-    mutableSession.redactedSummary = therapyJournalDraft.redactedSummary;
-    if (supervisionRun) {
-      mutableSession.supervisionId = supervisionRun.id;
-    }
-
-    if (hasExistingTherapyJournal) {
-      const existing = draft.therapyJournals.find((item) => item.userId === user.id);
-      if (existing) {
-        existing.updatedAt = therapyJournal.updatedAt;
-        existing.content = therapyJournal.content;
-        existing.redactedSummary = therapyJournal.redactedSummary;
-      }
-    } else {
-      draft.therapyJournals.push(therapyJournal);
-    }
-
-    if (supervisionRun) {
-      draft.supervisionRuns.push(supervisionRun);
-    }
-
-    if (supervisionJournal) {
-      const existing = draft.supervisionJournals.find((item) => item.userId === user.id);
-      if (existing) {
-        existing.updatedAt = supervisionJournal.updatedAt;
-        existing.content = supervisionJournal.content;
-        existing.redactedSummary = supervisionJournal.redactedSummary;
-      } else {
-        draft.supervisionJournals.push(supervisionJournal);
-      }
-    }
-  });
-
-  if (alreadyCompleted) {
+  const completionLock = await acquireCompletionLock(user.id, sessionId);
+  if (completionLock.sessionAlreadyCompleted) {
     return {
       sessionId: session.id,
       supervisionCreated: Boolean(session.supervisionId),
       alreadyCompleted: true
     };
   }
-
-  await logEvent(user, "session_completed", { autoSupervision: session.autoSupervision }, session.id);
-  if (session.autoSupervision) {
-    await logEvent(user, "supervision_completed", { sessionTitle: session.title }, session.id);
+  if (!completionLock.acquired) {
+    throw new Error("SESSION_COMPLETING");
   }
 
-  return {
-    sessionId: session.id,
-    supervisionCreated: Boolean(supervisionRun),
-    alreadyCompleted: false
+  try {
+    const messages = parseTranscript(session);
+    const therapyJournalDraft = buildTherapyJournal(messages, session.title);
+    const therapyJournalExisting = db.therapyJournals.find((item) => item.userId === user.id);
+    const mergedTherapy = mergeJournalContent(
+      therapyJournalExisting
+        ? decryptForUser(user.id, therapyJournalExisting.content)
+        : null,
+      therapyJournalDraft.content
+    );
+
+    const therapyJournal: TherapyJournalRecord = therapyJournalExisting ?? {
+      id: createId("therapy_journal"),
+      userId: user.id,
+      updatedAt: new Date().toISOString(),
+      content: encryptForUser(user.id, mergedTherapy),
+      redactedSummary: therapyJournalDraft.redactedSummary
+    };
+
+    const hasExistingTherapyJournal = Boolean(therapyJournalExisting);
+
+    let supervisionRun: SupervisionRunRecord | undefined;
+    let supervisionJournal: SupervisionJournalRecord | undefined;
+    let alreadyCompleted = false;
+
+    if (session.autoSupervision) {
+      const supervisionJournalExisting = db.supervisionJournals.find(
+        (item) => item.userId === user.id
+      );
+      const supervisionOutput = await generateSupervisionArtifacts({
+        sessionTitle: session.title,
+        messages,
+        supervisionJournal: supervisionJournalExisting
+          ? decryptForUser(user.id, supervisionJournalExisting.content)
+          : null
+      });
+      supervisionRun = {
+        id: createId("supervision"),
+        userId: user.id,
+        sessionId: session.id,
+        status: "completed",
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        transcript: encryptForUser(user.id, JSON.stringify(supervisionOutput.transcript)),
+        journalEntry: encryptForUser(user.id, supervisionOutput.journalEntry),
+        redactedSummary: supervisionOutput.redactedSummary,
+        journalEntryPreview: supervisionOutput.journalEntryPreview
+      };
+
+      const mergedSupervision = mergeJournalContent(
+        supervisionJournalExisting
+          ? decryptForUser(user.id, supervisionJournalExisting.content)
+          : null,
+        supervisionOutput.journalEntry
+      );
+
+      supervisionJournal = supervisionJournalExisting ?? {
+        id: createId("supervision_journal"),
+        userId: user.id,
+        updatedAt: new Date().toISOString(),
+        content: encryptForUser(user.id, mergedSupervision),
+        redactedSummary: supervisionOutput.redactedSummary
+      };
+
+      if (supervisionJournalExisting) {
+        supervisionJournal.updatedAt = new Date().toISOString();
+        supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
+        supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
+      }
+    }
+
+    if (therapyJournalExisting) {
+      therapyJournal.updatedAt = new Date().toISOString();
+      therapyJournal.content = encryptForUser(user.id, mergedTherapy);
+      therapyJournal.redactedSummary = therapyJournalDraft.redactedSummary;
+    }
+
+    let finalized = false;
+    await writeDb((draft) => {
+      const mutableSession = draft.therapySessions.find((item) => item.id === session.id);
+      if (!mutableSession) {
+        return;
+      }
+
+      if (mutableSession.status === "completed") {
+        alreadyCompleted = true;
+        return;
+      }
+
+      if (mutableSession.completionLockId !== completionLock.lockId) {
+        return;
+      }
+
+      mutableSession.status = "completed";
+      mutableSession.completedAt = new Date().toISOString();
+      mutableSession.updatedAt = new Date().toISOString();
+      mutableSession.redactedSummary = therapyJournalDraft.redactedSummary;
+      delete mutableSession.completionLockId;
+      delete mutableSession.completionLockAt;
+      finalized = true;
+      if (supervisionRun) {
+        mutableSession.supervisionId = supervisionRun.id;
+      }
+
+      if (hasExistingTherapyJournal) {
+        const existing = draft.therapyJournals.find((item) => item.userId === user.id);
+        if (existing) {
+          existing.updatedAt = therapyJournal.updatedAt;
+          existing.content = therapyJournal.content;
+          existing.redactedSummary = therapyJournal.redactedSummary;
+        }
+      } else {
+        draft.therapyJournals.push(therapyJournal);
+      }
+
+      if (supervisionRun) {
+        draft.supervisionRuns.push(supervisionRun);
+      }
+
+      if (supervisionJournal) {
+        const existing = draft.supervisionJournals.find((item) => item.userId === user.id);
+        if (existing) {
+          existing.updatedAt = supervisionJournal.updatedAt;
+          existing.content = supervisionJournal.content;
+          existing.redactedSummary = supervisionJournal.redactedSummary;
+        } else {
+          draft.supervisionJournals.push(supervisionJournal);
+        }
+      }
+    });
+
+    if (alreadyCompleted) {
+      return {
+        sessionId: session.id,
+        supervisionCreated: Boolean(session.supervisionId),
+        alreadyCompleted: true
+      };
+    }
+
+    if (!finalized) {
+      throw new Error("SESSION_COMPLETING");
+    }
+
+    await logEvent(user, "session_completed", { autoSupervision: session.autoSupervision }, session.id);
+    if (session.autoSupervision) {
+      await logEvent(user, "supervision_completed", { sessionTitle: session.title }, session.id);
+    }
+
+    return {
+      sessionId: session.id,
+      supervisionCreated: Boolean(supervisionRun),
+      alreadyCompleted: false
+    };
+  } catch (error) {
+    await releaseCompletionLock(user.id, session.id, completionLock.lockId);
+    throw error;
   };
 }
 

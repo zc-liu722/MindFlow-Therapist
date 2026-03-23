@@ -28,11 +28,14 @@ export async function POST(request: Request) {
     const password = body.password ?? "";
     const displayName = body.displayName?.trim() || username;
 
-    assertRateLimit({
-      key: `auth-register:ip:${getClientIp(request)}`,
-      limit: 6,
-      windowMs: 10 * 60_000
-    });
+    const clientIp = getClientIp(request);
+    if (clientIp) {
+      assertRateLimit({
+        key: `auth-register:ip:${clientIp}`,
+        limit: 6,
+        windowMs: 10 * 60_000
+      });
+    }
     assertRateLimit({
       key: `auth-register:user:${username.toLowerCase()}`,
       limit: 4,
@@ -70,7 +73,13 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "注册失败";
-    const status = message === "RATE_LIMITED" ? 429 : 400;
+    const status =
+      message === "RATE_LIMITED"
+        ? 429
+        : message === "ADMIN_INVITE_CODE_MISSING" ||
+            message === "ADMIN_INVITE_CODE_INSECURE"
+          ? 503
+          : 400;
     return NextResponse.json({ error: message }, { status });
   }
 }

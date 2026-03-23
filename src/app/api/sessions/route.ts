@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireRole } from "@/lib/auth";
 import { createSession, listSessionsForUser } from "@/lib/domain";
-import { assertRateLimit, getClientIp } from "@/lib/rate-limit";
+import { assertRateLimit } from "@/lib/rate-limit";
 import { DEFAULT_SESSION_MODE, normalizeSessionMode } from "@/lib/session-modes";
 
 export const runtime = "nodejs";
@@ -10,12 +10,12 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
+    const user = await requireRole("user");
     assertRateLimit({
-      key: `sessions-list:${getClientIp(request)}`,
+      key: `sessions-list:user:${user.id}`,
       limit: 120,
       windowMs: 60_000
     });
-    const user = await requireRole("user");
     const sessions = await listSessionsForUser(user.id);
     return NextResponse.json({ sessions });
   } catch (error) {
@@ -27,12 +27,12 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const user = await requireRole("user");
     assertRateLimit({
-      key: `sessions-create:${getClientIp(request)}`,
+      key: `sessions-create:user:${user.id}`,
       limit: 20,
       windowMs: 60_000
     });
-    const user = await requireRole("user");
     const body = (await request.json()) as {
       title?: string;
       mode?: string;

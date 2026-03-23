@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { requireRole } from "@/lib/auth";
 import { AnthropicConfigError, AnthropicRequestError } from "@/lib/anthropic";
 import { completeSession } from "@/lib/domain";
-import { assertRateLimit, getClientIp } from "@/lib/rate-limit";
+import { assertRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,13 +13,13 @@ export async function POST(
   context: { params: Promise<{ sessionId: string }> }
 ) {
   try {
+    const user = await requireRole("user");
+    const { sessionId } = await context.params;
     assertRateLimit({
-      key: `session-complete:${getClientIp(request)}`,
+      key: `session-complete:user:${user.id}:${sessionId}`,
       limit: 20,
       windowMs: 60_000
     });
-    const user = await requireRole("user");
-    const { sessionId } = await context.params;
     const result = await completeSession(user, sessionId);
     return NextResponse.json(result);
   } catch (error) {
@@ -30,9 +30,11 @@ export async function POST(
         : message === "FORBIDDEN"
           ? 403
           : message === "RATE_LIMITED"
-            ? 429
+          ? 429
           : message === "NOT_FOUND"
             ? 404
+            : message === "SESSION_COMPLETING"
+              ? 409
             : error instanceof AnthropicConfigError
               ? 503
               : error instanceof AnthropicRequestError

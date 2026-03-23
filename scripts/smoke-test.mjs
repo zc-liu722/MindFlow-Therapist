@@ -9,6 +9,8 @@ const PORT = 3101;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const DB_PATH = path.join(ROOT, "data", "db.json");
 const DB_BACKUP_PATH = path.join(ROOT, "data", `db.smoke-backup-${Date.now()}.json`);
+const USER_PASSWORD = "SmokeUserPass123!";
+const ADMIN_PASSWORD = "SmokeAdminPass123!";
 
 function parseEnvFile(content) {
   return Object.fromEntries(
@@ -129,11 +131,15 @@ async function main() {
     "utf8"
   );
 
-  const server = spawn("./node_modules/.bin/next", ["start", "-p", String(PORT)], {
-    cwd: ROOT,
-    stdio: "pipe",
-    env: process.env
-  });
+  const server = spawn(
+    process.execPath,
+    ["scripts/run-with-node-compat.mjs", "start", "-H", "127.0.0.1", "-p", String(PORT)],
+    {
+      cwd: ROOT,
+      stdio: "pipe",
+      env: process.env
+    }
+  );
 
   let serverLog = "";
   server.stdout.on("data", (chunk) => {
@@ -149,19 +155,22 @@ async function main() {
     const userJar = createCookieJar();
     const userName = `smoke-user-${randomUUID().slice(0, 8)}`;
 
-    const loginResult = await requestJson(
-      "/api/auth/login",
+    const registerResult = await requestJson(
+      "/api/auth/register",
       {
         method: "POST",
         body: JSON.stringify({
           username: userName,
+          displayName: userName,
+          password: USER_PASSWORD,
           role: "user",
-          autoCreate: true
+          privacyConsent: true,
+          aiProcessingConsent: true
         })
       },
       userJar
     );
-    assert(loginResult.response.ok, `User login failed: ${JSON.stringify(loginResult.payload)}`);
+    assert(registerResult.response.ok, `User register failed: ${JSON.stringify(registerResult.payload)}`);
 
     const sessionResult = await requestJson(
       "/api/sessions",
@@ -224,8 +233,11 @@ async function main() {
         body: JSON.stringify({
           username: adminName,
           displayName: adminName,
+          password: ADMIN_PASSWORD,
           role: "admin",
-          adminInviteCode
+          adminInviteCode,
+          privacyConsent: true,
+          aiProcessingConsent: true
         })
       },
       adminJar
