@@ -192,6 +192,19 @@ function extractText(response: AnthropicResponse) {
     .trim();
 }
 
+function extractThinking(response: AnthropicResponse) {
+  const content = response.content ?? [];
+  return content
+    .filter(
+      (block): block is AnthropicContentBlock & { thinking: string } =>
+        block.type === "thinking" && Boolean(block.thinking)
+    )
+    .map((block) => block.thinking.trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
 function toVisibleTranscript(messages: ChatMessage[]) {
   return messages
     .filter((message) => message.role !== "system")
@@ -542,7 +555,7 @@ async function requestAnthropicText(input: {
       if (!payload.text) {
         throw new AnthropicRequestError("Anthropic 返回了空内容", 502);
       }
-      return payload.text;
+      return payload;
     }
 
     const payload = (await response.json()) as AnthropicResponse;
@@ -551,7 +564,10 @@ async function requestAnthropicText(input: {
       throw new AnthropicRequestError("Anthropic 返回了空内容", 502);
     }
 
-    return text;
+    return {
+      text,
+      thinking: extractThinking(payload)
+    };
   } catch (error) {
     if (error instanceof AnthropicConfigError || error instanceof AnthropicRequestError) {
       throw error;
@@ -579,7 +595,7 @@ export async function generateTherapyReply(input: {
   const lastUserMessage =
     [...input.messages].reverse().find((message) => message.role === "user")?.content ?? "";
   const riskLevel = detectRiskLevel(lastUserMessage);
-  const text = await requestAnthropicText({
+  const reply = await requestAnthropicText({
     system: await buildSystemPrompt({
       title: input.title,
       mode: input.mode,
@@ -596,8 +612,10 @@ export async function generateTherapyReply(input: {
     message: {
       id: createId("msg"),
       role: "assistant" as const,
-      content: text,
-      createdAt: new Date().toISOString()
+      content: reply.text,
+      createdAt: new Date().toISOString(),
+      thinking: reply.thinking,
+      rawThinking: reply.thinking
     },
     riskLevel,
     themes
@@ -613,7 +631,7 @@ export async function generateSupervisionArtifacts(input: {
   const themes = summarizeThemes(input.messages);
   const transcriptBlock = toVisibleTranscript(input.messages);
 
-  const text = await requestAnthropicText({
+  const reply = await requestAnthropicText({
     system: buildSupervisionSystemPrompt({
       supervisorRule: supervisorRule.body,
       sessionTitle: input.sessionTitle,
@@ -634,7 +652,7 @@ export async function generateSupervisionArtifacts(input: {
     ]
   });
 
-  const parsed = parseSupervisionPayload(text);
+  const parsed = parseSupervisionPayload(reply.text);
   const now = new Date().toISOString();
 
   return {

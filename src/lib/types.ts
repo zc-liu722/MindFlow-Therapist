@@ -39,6 +39,8 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   createdAt: string;
+  thinking?: string;
+  rawThinking?: string;
 }
 
 export interface TherapySessionRecord {

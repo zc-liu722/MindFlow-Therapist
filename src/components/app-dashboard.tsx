@@ -155,7 +155,16 @@ function getTypingStep(targetLength: number, currentLength: number) {
 
 function formatStreamingThinkingLine(thinking?: string) {
   const normalized = thinking?.replace(/\s+/g, " ").trim();
-  return normalized ? `咨询师思考中：${normalized}` : "咨询师思考中";
+  if (!normalized) {
+    return "咨询师思考中";
+  }
+
+  const previewLimit = 24;
+  const segments = Array.from(normalized);
+  const preview =
+    segments.length > previewLimit ? `…${segments.slice(-previewLimit).join("")}` : normalized;
+
+  return `咨询师思考中：${preview}`;
 }
 
 function isStreamNearBottom(element: HTMLDivElement) {
@@ -401,12 +410,6 @@ export function AppDashboard({ user }: { user: User }) {
           style={{ width: `${activeSessionProgress.percent}%` }}
         />
       </div>
-      <div className="session-progress-steps" aria-hidden="true">
-        <span className={activeSessionProgress.percent >= 1 ? "is-active" : ""}>开始</span>
-        <span className={activeSessionProgress.percent >= 24 ? "is-active" : ""}>展开</span>
-        <span className={activeSessionProgress.percent >= 60 ? "is-active" : ""}>整理</span>
-        <span className={activeSessionProgress.percent >= 86 ? "is-active" : ""}>收束</span>
-      </div>
       <div className="session-progress-foot">
         <span>{activeSessionProgress.percent}%</span>
         <span>{activeSessionProgress.detailLabel}</span>
@@ -431,6 +434,36 @@ export function AppDashboard({ user }: { user: User }) {
     const composerHeight = composerRef.current?.offsetHeight ?? 0;
     root.style.setProperty("--composer-height", `${composerHeight}px`);
   }, []);
+
+  const syncViewportMetrics = useCallback(() => {
+    const root = document.documentElement;
+    const viewport = window.visualViewport;
+    const viewportHeight = viewport?.height ?? window.innerHeight;
+    const keyboardInset = viewport
+      ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+      : 0;
+
+    root.style.setProperty("--visual-viewport-height", `${viewportHeight}px`);
+    root.style.setProperty("--keyboard-inset", `${keyboardInset}px`);
+    syncComposerMetrics();
+  }, [syncComposerMetrics]);
+
+  const revealComposer = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const composer = composerRef.current;
+    if (!composer) {
+      return;
+    }
+
+    composer.scrollIntoView({
+      block: "end",
+      inline: "nearest",
+      behavior
+    });
+
+    window.requestAnimationFrame(() => {
+      scrollChatToBottom(behavior === "auto" ? "auto" : "smooth");
+    });
+  }, [scrollChatToBottom]);
 
   const syncProgressMetrics = useCallback(() => {
     const root = document.documentElement;
@@ -808,38 +841,31 @@ export function AppDashboard({ user }: { user: User }) {
   useEffect(() => {
     const root = document.documentElement;
     const viewport = window.visualViewport;
-
-    if (!viewport) {
-      root.style.setProperty("--keyboard-inset", "0px");
-      return;
-    }
-
     const syncViewportInset = () => {
-      const keyboardInset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
-      root.style.setProperty("--keyboard-inset", `${keyboardInset}px`);
-      syncComposerMetrics();
+      syncViewportMetrics();
 
       if (
         document.activeElement === composerTextareaRef.current &&
-        view === "chat" &&
-        shouldStickToBottomRef.current
+        view === "chat"
       ) {
-        window.requestAnimationFrame(() => {
-          scrollChatToBottom("auto");
-        });
+        shouldStickToBottomRef.current = true;
+        revealComposer("auto");
       }
     };
 
     syncViewportInset();
-    viewport.addEventListener("resize", syncViewportInset);
-    viewport.addEventListener("scroll", syncViewportInset);
+    window.addEventListener("resize", syncViewportInset);
+    viewport?.addEventListener("resize", syncViewportInset);
+    viewport?.addEventListener("scroll", syncViewportInset);
 
     return () => {
-      viewport.removeEventListener("resize", syncViewportInset);
-      viewport.removeEventListener("scroll", syncViewportInset);
+      window.removeEventListener("resize", syncViewportInset);
+      viewport?.removeEventListener("resize", syncViewportInset);
+      viewport?.removeEventListener("scroll", syncViewportInset);
       root.style.setProperty("--keyboard-inset", "0px");
+      root.style.setProperty("--visual-viewport-height", "100dvh");
     };
-  }, [scrollChatToBottom, syncComposerMetrics, view]);
+  }, [revealComposer, syncViewportMetrics, view]);
 
   useEffect(() => {
     const stream = streamRef.current;
@@ -1163,8 +1189,8 @@ export function AppDashboard({ user }: { user: User }) {
                     ...assistantMessage,
                     animateIn: message.animateIn,
                     content: message.content,
-                    thinking: message.thinking,
-                    rawThinking: message.rawThinking,
+                    thinking: message.thinking ?? assistantMessage.thinking,
+                    rawThinking: message.rawThinking ?? assistantMessage.rawThinking,
                     streamTargetContent: assistantMessage.content,
                     isStreaming: true,
                     streamingDone: true
@@ -1218,9 +1244,11 @@ export function AppDashboard({ user }: { user: User }) {
 
   function handleComposerFocus() {
     shouldStickToBottomRef.current = true;
-    scrollChatToBottom("auto");
+    syncViewportMetrics();
+    revealComposer("auto");
     window.setTimeout(() => {
-      scrollChatToBottom("auto");
+      syncViewportMetrics();
+      revealComposer("auto");
     }, 220);
   }
 
@@ -1472,24 +1500,60 @@ export function AppDashboard({ user }: { user: User }) {
                   <h1>会谈</h1>
                 )}
               </div>
-              <IconButton
-                className="ghost-button theme-toggle-button"
-                dataThemeMode={
-                  themePreference === "system" ? "A" : themePreference === "light" ? "日" : "夜"
-                }
-                label={getThemeButtonLabel()}
-                onClick={() => setThemePreference(nextThemePreference[themePreference])}
-              >
-                {renderThemeIcon()}
-              </IconButton>
-              <button
-                className="primary-button top-create-button main-create-button"
-                aria-label="新建会谈"
-                onClick={() => setCreatePanelOpen(true)}
-                type="button"
-              >
-                <PlusIcon />
-              </button>
+              {view === "chat" && activeSession ? (
+                <div className="session-floating-bar">
+                  <div className="chat-stage-session-meta">
+                    <div className="header-session-signals chat-stage-session-signals">
+                      <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
+                      <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
+                    </div>
+                  </div>
+                  <div className="stage-actions session-stage-actions">
+                    {activeSession.status === "active" ? (
+                      <button
+                        className="primary-button"
+                        disabled={busy}
+                        onClick={() => setSessionToComplete(activeSessionMeta ?? activeSession)}
+                        type="button"
+                      >
+                        结束
+                      </button>
+                    ) : (
+                      <span className="pill">已归档</span>
+                    )}
+                    <IconButton
+                      className="ghost-button danger-button"
+                      label="删除会谈"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSessionToDelete(activeSessionMeta ?? activeSession);
+                      }}
+                    >
+                      <TrashIcon />
+                    </IconButton>
+                  </div>
+                </div>
+              ) : null}
+              <div className="header-global-actions">
+                <IconButton
+                  className="ghost-button theme-toggle-button"
+                  dataThemeMode={
+                    themePreference === "system" ? "A" : themePreference === "light" ? "日" : "夜"
+                  }
+                  label={getThemeButtonLabel()}
+                  onClick={() => setThemePreference(nextThemePreference[themePreference])}
+                >
+                  {renderThemeIcon()}
+                </IconButton>
+                <button
+                  className="primary-button top-create-button main-create-button"
+                  aria-label="新建会谈"
+                  onClick={() => setCreatePanelOpen(true)}
+                  type="button"
+                >
+                  <PlusIcon />
+                </button>
+              </div>
             </div>
           </header>
 
@@ -1508,39 +1572,6 @@ export function AppDashboard({ user }: { user: User }) {
                 <section className="chat-stage">
                 {activeSession ? (
                   <>
-                    <div className="chat-stage-head">
-                      <div className="chat-stage-session-meta">
-                        <div className="header-session-signals chat-stage-session-signals">
-                          <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
-                          <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
-                        </div>
-                      </div>
-                      <div className="stage-actions session-stage-actions">
-                        {activeSession.status === "active" ? (
-                          <button
-                            className="primary-button"
-                            disabled={busy}
-                            onClick={() => setSessionToComplete(activeSessionMeta ?? activeSession)}
-                            type="button"
-                          >
-                            结束
-                          </button>
-                        ) : (
-                          <span className="pill">已归档</span>
-                        )}
-                        <IconButton
-                          className="ghost-button danger-button"
-                          label="删除会谈"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setSessionToDelete(activeSessionMeta ?? activeSession);
-                          }}
-                        >
-                          <TrashIcon />
-                        </IconButton>
-                      </div>
-                    </div>
-
                     <div className="chat-stage-scroll-shell">
                       {progressCard ? (
                         <div className="chat-stage-progress-overlay" ref={progressCardRef}>
@@ -1577,9 +1608,11 @@ export function AppDashboard({ user }: { user: User }) {
                                           <span />
                                           <span />
                                         </div>
-                                        <p className="thinking-inline">
-                                          {formatStreamingThinkingLine(message.rawThinking)}
-                                        </p>
+                                        <div className="thinking-inline-viewport">
+                                          <span className="thinking-inline" aria-live="polite">
+                                            {formatStreamingThinkingLine(message.rawThinking)}
+                                          </span>
+                                        </div>
                                       </div>
                                     </div>
                                     {message.content ? <p>{message.content}</p> : null}
@@ -1625,7 +1658,9 @@ export function AppDashboard({ user }: { user: User }) {
                                       <span />
                                       <span />
                                     </div>
-                                    <p className="thinking-inline">咨询师思考中</p>
+                                    <div className="thinking-inline-viewport">
+                                      <span className="thinking-inline">咨询师思考中</span>
+                                    </div>
                                   </div>
                                 )}
                               </article>

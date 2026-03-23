@@ -163,13 +163,13 @@ export function estimateSessionProgress(
     opening: {
       phaseLabel: "正在建立本次会谈焦点",
       summary: "先把当前最需要被看见的情绪、情境和期待摆到台面上。",
-      milestoneLabel: "阶段 1 / 4",
+      milestoneLabel: "开始",
       detailLabel: userMessages.length > 0 ? "已接住开场信息" : "等待第一条消息"
     },
     exploration: {
       phaseLabel: "正在展开体验与关键主题",
       summary: "咨询师会继续追踪情绪、关系和触发点，不会只按轮数草草推进。",
-      milestoneLabel: "阶段 2 / 4",
+      milestoneLabel: "展开",
       detailLabel:
         themes.length > 0
           ? `已浮现 ${themes.length} 个主题`
@@ -178,7 +178,7 @@ export function estimateSessionProgress(
     integration: {
       phaseLabel: "正在整理线索并形成理解",
       summary: "会把已经浮现的模式和感受串起来，慢慢靠近更清晰的理解。",
-      milestoneLabel: "阶段 3 / 4",
+      milestoneLabel: "整理",
       detailLabel:
         reflectionHits > 0
           ? `已出现 ${reflectionHits} 次反思回应`
@@ -187,7 +187,7 @@ export function estimateSessionProgress(
     closing: {
       phaseLabel: "正在收束本次会谈",
       summary: "开始把重点收拢成可带走的线索、提醒或下次继续的方向。",
-      milestoneLabel: "阶段 4 / 4",
+      milestoneLabel: "收束",
       detailLabel:
         actionHits > 0 ? `已形成 ${actionHits} 个行动/收束线索` : "正在整理可带走的重点"
     }
