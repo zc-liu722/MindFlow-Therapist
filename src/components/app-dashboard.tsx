@@ -3,6 +3,7 @@
 import {
   type FormEvent,
   type KeyboardEvent,
+  type UIEvent,
   type MouseEvent,
   type ReactNode,
   useCallback,
@@ -47,6 +48,7 @@ type ChatMessage = {
   content: string;
   createdAt: string;
   thinking?: string;
+  rawThinking?: string;
   streamTargetContent?: string;
   isStreaming?: boolean;
   streamingDone?: boolean;
@@ -75,6 +77,8 @@ const MODE_PICKER_ITEM_HEIGHT = 76;
 const MODE_PICKER_VISIBLE_ROWS = 3;
 const MODE_PICKER_SPACER_HEIGHT = (MODE_PICKER_ITEM_HEIGHT * (MODE_PICKER_VISIBLE_ROWS - 1)) / 2;
 const MODE_PICKER_MAX_DISTANCE = 2.75;
+const MODE_PICKER_SCROLL_END_DELAY = 220;
+const MODE_PICKER_SNAP_DURATION = 1000;
 
 function formatDateTime(value?: string) {
   if (!value) {
@@ -149,8 +153,13 @@ function getTypingStep(targetLength: number, currentLength: number) {
   return 1;
 }
 
-function formatThinkingLine(thinking?: string) {
-  return thinking?.trim() || "梳理你刚刚提到的重点";
+function formatStreamingThinkingLine(thinking?: string) {
+  const normalized = thinking?.replace(/\s+/g, " ").trim();
+  return normalized ? `咨询师思考中：${normalized}` : "咨询师思考中";
+}
+
+function isStreamNearBottom(element: HTMLDivElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 96;
 }
 
 function parseSseChunk(chunk: string) {
@@ -265,6 +274,14 @@ function TrashIcon() {
   );
 }
 
+function ChevronDownIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="m6.5 9.5 5.5 5 5.5-5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
 function SunIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -319,11 +336,15 @@ function AutoThemeIcon() {
 export function AppDashboard({ user }: { user: User }) {
   const router = useRouter();
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerRef = useRef<HTMLFormElement | null>(null);
+  const progressCardRef = useRef<HTMLDivElement | null>(null);
   const sessionRequestRef = useRef(0);
   const initialLoadRef = useRef(false);
   const modePickerRef = useRef<HTMLDivElement | null>(null);
   const modePickerTimeoutRef = useRef<number | null>(null);
+  const modePickerSnapFrameRef = useRef<number | null>(null);
 
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -347,6 +368,7 @@ export function AppDashboard({ user }: { user: User }) {
   const [portalReady, setPortalReady] = useState(false);
   const [modePickerScrollTop, setModePickerScrollTop] = useState(0);
   const [modePickerScrolling, setModePickerScrolling] = useState(false);
+  const [expandedThinkingIds, setExpandedThinkingIds] = useState<string[]>([]);
 
   const activeSessionMeta =
     sessions.find((session) => session.id === selectedSessionId) ?? activeSession;
@@ -355,6 +377,66 @@ export function AppDashboard({ user }: { user: User }) {
   const lastMessage = activeSession?.messages.at(-1);
   const activeSessionId = activeSession?.id;
   const activeSessionProgress = activeSession ? estimateSessionProgress(activeSession) : null;
+  const progressCard = activeSessionProgress ? (
+    <div
+      aria-label={`会谈进度 ${activeSessionProgress.percent}%`}
+      className="session-progress-card"
+    >
+      <div className="session-progress-meta">
+        <div>
+          <strong>{activeSessionProgress.phaseLabel}</strong>
+          <p>{activeSessionProgress.summary}</p>
+        </div>
+        <span>{activeSessionProgress.milestoneLabel}</span>
+      </div>
+      <div
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={activeSessionProgress.percent}
+        className="session-progress-track"
+        role="progressbar"
+      >
+        <span
+          className="session-progress-fill"
+          style={{ width: `${activeSessionProgress.percent}%` }}
+        />
+      </div>
+      <div className="session-progress-steps" aria-hidden="true">
+        <span className={activeSessionProgress.percent >= 1 ? "is-active" : ""}>开始</span>
+        <span className={activeSessionProgress.percent >= 24 ? "is-active" : ""}>展开</span>
+        <span className={activeSessionProgress.percent >= 60 ? "is-active" : ""}>整理</span>
+        <span className={activeSessionProgress.percent >= 86 ? "is-active" : ""}>收束</span>
+      </div>
+      <div className="session-progress-foot">
+        <span>{activeSessionProgress.percent}%</span>
+        <span>{activeSessionProgress.detailLabel}</span>
+      </div>
+    </div>
+  ) : null;
+
+  const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const stream = streamRef.current;
+    if (!stream) {
+      return;
+    }
+
+    stream.scrollTo({
+      top: stream.scrollHeight,
+      behavior
+    });
+  }, []);
+
+  const syncComposerMetrics = useCallback(() => {
+    const root = document.documentElement;
+    const composerHeight = composerRef.current?.offsetHeight ?? 0;
+    root.style.setProperty("--composer-height", `${composerHeight}px`);
+  }, []);
+
+  const syncProgressMetrics = useCallback(() => {
+    const root = document.documentElement;
+    const progressHeight = progressCardRef.current?.offsetHeight ?? 0;
+    root.style.setProperty("--session-progress-height", `${progressHeight}px`);
+  }, []);
 
   useEffect(() => {
     if (!createPanelOpen) {
@@ -400,7 +482,52 @@ export function AppDashboard({ user }: { user: User }) {
 
     textarea.style.height = `${Math.max(nextHeight, lineHeight)}px`;
     textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
-  }, [messageInput, activeSessionId]);
+    syncComposerMetrics();
+  }, [messageInput, activeSessionId, syncComposerMetrics]);
+
+  useEffect(() => {
+    syncComposerMetrics();
+  }, [activeSession?.status, busy, syncComposerMetrics]);
+
+  useEffect(() => {
+    const composer = composerRef.current;
+    if (!composer || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      syncComposerMetrics();
+    });
+
+    observer.observe(composer);
+    return () => observer.disconnect();
+  }, [syncComposerMetrics]);
+
+  useEffect(() => {
+    syncProgressMetrics();
+  }, [activeSessionId, activeSessionProgress?.percent, syncProgressMetrics]);
+
+  useEffect(() => {
+    if (activeSessionProgress) {
+      return;
+    }
+
+    document.documentElement.style.setProperty("--session-progress-height", "0px");
+  }, [activeSessionProgress]);
+
+  useEffect(() => {
+    const progressCardNode = progressCardRef.current;
+    if (!progressCardNode || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      syncProgressMetrics();
+    });
+
+    observer.observe(progressCardNode);
+    return () => observer.disconnect();
+  }, [activeSessionId, activeSessionProgress?.percent, syncProgressMetrics]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -464,31 +591,109 @@ export function AppDashboard({ user }: { user: User }) {
       if (modePickerTimeoutRef.current) {
         window.clearTimeout(modePickerTimeoutRef.current);
       }
+      if (modePickerSnapFrameRef.current) {
+        window.cancelAnimationFrame(modePickerSnapFrameRef.current);
+      }
     };
   }, []);
 
-  function snapModePicker(index: number, behavior: ScrollBehavior = "smooth") {
+  function stopModePickerSnapAnimation() {
+    if (modePickerSnapFrameRef.current) {
+      window.cancelAnimationFrame(modePickerSnapFrameRef.current);
+      modePickerSnapFrameRef.current = null;
+    }
+  }
+
+  function animateModePickerTo(top: number, duration = MODE_PICKER_SNAP_DURATION) {
     const picker = modePickerRef.current;
     if (!picker) {
       return;
     }
 
-    const nextTop = index * MODE_PICKER_ITEM_HEIGHT;
-    setModePickerScrollTop(nextTop);
-    picker.scrollTo({
-      top: nextTop,
-      behavior
-    });
+    stopModePickerSnapAnimation();
+
+    const startTop = picker.scrollTop;
+    const distance = top - startTop;
+
+    if (Math.abs(distance) < 0.5) {
+      picker.scrollTop = top;
+      setModePickerScrollTop(top);
+      return;
+    }
+
+    const startTime = performance.now();
+
+    const step = (now: number) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const nextTop = startTop + distance * eased;
+
+      picker.scrollTop = nextTop;
+      setModePickerScrollTop(nextTop);
+
+      if (progress < 1) {
+        modePickerSnapFrameRef.current = window.requestAnimationFrame(step);
+        return;
+      }
+
+      picker.scrollTop = top;
+      setModePickerScrollTop(top);
+      modePickerSnapFrameRef.current = null;
+    };
+
+    modePickerSnapFrameRef.current = window.requestAnimationFrame(step);
   }
 
-  function selectModeByIndex(index: number, behavior: ScrollBehavior = "smooth") {
+  function snapModePicker(index: number, animate = true) {
+    const nextTop = index * MODE_PICKER_ITEM_HEIGHT;
+
+    if (!animate) {
+      const picker = modePickerRef.current;
+      if (!picker) {
+        return;
+      }
+      stopModePickerSnapAnimation();
+      picker.scrollTop = nextTop;
+      setModePickerScrollTop(nextTop);
+      return;
+    }
+
+    animateModePickerTo(nextTop);
+  }
+
+  function settleModePicker() {
+    const picker = modePickerRef.current;
+    if (!picker) {
+      return;
+    }
+
+    const rawIndex = picker.scrollTop / MODE_PICKER_ITEM_HEIGHT;
+    const nextIndex = Math.max(0, Math.min(Math.round(rawIndex), SESSION_MODE_OPTIONS.length - 1));
+    const nextMode = SESSION_MODE_OPTIONS[nextIndex];
+    const alignedTop = nextIndex * MODE_PICKER_ITEM_HEIGHT;
+    const offset = Math.abs(picker.scrollTop - alignedTop);
+
+    if (nextMode && nextMode !== draftMode) {
+      setDraftMode(nextMode);
+    }
+
+    if (offset > 0.5) {
+      snapModePicker(nextIndex, true);
+      return;
+    }
+
+    setModePickerScrollTop(alignedTop);
+  }
+
+  function selectModeByIndex(index: number, animate = true) {
     const nextMode = SESSION_MODE_OPTIONS[Math.max(0, Math.min(index, SESSION_MODE_OPTIONS.length - 1))];
     if (!nextMode) {
       return;
     }
 
     setDraftMode(nextMode);
-    snapModePicker(SESSION_MODE_OPTIONS.indexOf(nextMode), behavior);
+    snapModePicker(SESSION_MODE_OPTIONS.indexOf(nextMode), animate);
   }
 
   function handleModePickerScroll() {
@@ -518,8 +723,8 @@ export function AppDashboard({ user }: { user: User }) {
 
     modePickerTimeoutRef.current = window.setTimeout(() => {
       setModePickerScrolling(false);
-      snapModePicker(nextIndex);
-    }, 110);
+      settleModePicker();
+    }, MODE_PICKER_SCROLL_END_DELAY);
   }
 
   const loadSessionDetail = useCallback(async (sessionId: string) => {
@@ -601,16 +806,66 @@ export function AppDashboard({ user }: { user: User }) {
   }, [loadJournals, loadSessions]);
 
   useEffect(() => {
-    const stream = streamRef.current;
-    if (!stream || view !== "chat") {
+    const root = document.documentElement;
+    const viewport = window.visualViewport;
+
+    if (!viewport) {
+      root.style.setProperty("--keyboard-inset", "0px");
       return;
     }
 
-    stream.scrollTo({
-      top: stream.scrollHeight,
-      behavior: "smooth"
-    });
-  }, [activeSession?.messages.length, lastMessage?.content, lastMessage?.thinking, view]);
+    const syncViewportInset = () => {
+      const keyboardInset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      root.style.setProperty("--keyboard-inset", `${keyboardInset}px`);
+      syncComposerMetrics();
+
+      if (
+        document.activeElement === composerTextareaRef.current &&
+        view === "chat" &&
+        shouldStickToBottomRef.current
+      ) {
+        window.requestAnimationFrame(() => {
+          scrollChatToBottom("auto");
+        });
+      }
+    };
+
+    syncViewportInset();
+    viewport.addEventListener("resize", syncViewportInset);
+    viewport.addEventListener("scroll", syncViewportInset);
+
+    return () => {
+      viewport.removeEventListener("resize", syncViewportInset);
+      viewport.removeEventListener("scroll", syncViewportInset);
+      root.style.setProperty("--keyboard-inset", "0px");
+    };
+  }, [scrollChatToBottom, syncComposerMetrics, view]);
+
+  useEffect(() => {
+    const stream = streamRef.current;
+    if (!stream || view !== "chat" || !shouldStickToBottomRef.current) {
+      return;
+    }
+
+    scrollChatToBottom("smooth");
+  }, [activeSession?.messages.length, lastMessage?.content, lastMessage?.thinking, scrollChatToBottom, view]);
+
+  useEffect(() => {
+    if (view !== "chat") {
+      return;
+    }
+
+    shouldStickToBottomRef.current = true;
+  }, [activeSessionId, view]);
+
+  useEffect(() => {
+    if (document.activeElement !== composerTextareaRef.current || view !== "chat") {
+      return;
+    }
+
+    shouldStickToBottomRef.current = true;
+    scrollChatToBottom("auto");
+  }, [messageInput, scrollChatToBottom, view]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -657,6 +912,18 @@ export function AppDashboard({ user }: { user: User }) {
     }, 18);
 
     return () => window.clearInterval(timer);
+  }, []);
+
+  const handleStreamScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    shouldStickToBottomRef.current = isStreamNearBottom(event.currentTarget);
+  }, []);
+
+  const toggleThinkingExpanded = useCallback((messageId: string) => {
+    setExpandedThinkingIds((current) =>
+      current.includes(messageId)
+        ? current.filter((id) => id !== messageId)
+        : [...current, messageId]
+    );
   }, []);
 
   async function createNewSession() {
@@ -725,6 +992,7 @@ export function AppDashboard({ user }: { user: User }) {
     setBusy(true);
     setNotice("");
     setMessageInput("");
+    shouldStickToBottomRef.current = true;
     setActiveSession((current) =>
       current
         ? {
@@ -776,7 +1044,7 @@ export function AppDashboard({ user }: { user: User }) {
 
       function applyStreamEvent(eventItem: { type: string; payload: unknown }) {
         if (eventItem.type === "thinking") {
-          const payload = eventItem.payload as { thinking?: string };
+          const payload = eventItem.payload as { thinking?: string; rawThinking?: string };
           setActiveSession((current) =>
             current
               ? {
@@ -785,12 +1053,18 @@ export function AppDashboard({ user }: { user: User }) {
                     message.id === temporaryAssistantMessage.id
                       ? {
                           ...message,
-                          thinking: payload.thinking ?? message.thinking ?? ""
+                          thinking: payload.thinking ?? message.thinking ?? "",
+                          rawThinking: payload.rawThinking ?? message.rawThinking ?? ""
                         }
                       : message
                   )
                 }
               : current
+          );
+          setExpandedThinkingIds((current) =>
+            current.includes(temporaryAssistantMessage.id)
+              ? current
+              : [...current, temporaryAssistantMessage.id]
           );
           return;
         }
@@ -889,6 +1163,8 @@ export function AppDashboard({ user }: { user: User }) {
                     ...assistantMessage,
                     animateIn: message.animateIn,
                     content: message.content,
+                    thinking: message.thinking,
+                    rawThinking: message.rawThinking,
                     streamTargetContent: assistantMessage.content,
                     isStreaming: true,
                     streamingDone: true
@@ -938,6 +1214,14 @@ export function AppDashboard({ user }: { user: User }) {
 
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
+  }
+
+  function handleComposerFocus() {
+    shouldStickToBottomRef.current = true;
+    scrollChatToBottom("auto");
+    window.setTimeout(() => {
+      scrollChatToBottom("auto");
+    }, 220);
   }
 
   async function completeCurrentSession() {
@@ -1183,10 +1467,6 @@ export function AppDashboard({ user }: { user: User }) {
                 {activeSession ? (
                   <>
                     <h1>{activeSession.title}</h1>
-                    <div className="header-session-signals">
-                      <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
-                      <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
-                    </div>
                   </>
                 ) : (
                   <h1>会谈</h1>
@@ -1215,23 +1495,6 @@ export function AppDashboard({ user }: { user: User }) {
 
           {notice ? <div className="notice">{notice}</div> : null}
 
-          <nav className="mobile-view-switch" aria-label="移动端视图切换">
-            {sessionTabs.map((item) => (
-              <button
-                aria-label={item.label}
-                aria-pressed={view === item.key}
-                className={view === item.key ? "mobile-view-chip is-active" : "mobile-view-chip"}
-                key={item.key}
-                onClick={() => handleViewChange(item.key)}
-                type="button"
-              >
-                <span className="mobile-view-chip-icon">{item.icon}</span>
-                <span className="mobile-view-chip-label">{item.label}</span>
-                {item.count !== undefined ? <span className="mobile-view-chip-count">{item.count}</span> : null}
-              </button>
-            ))}
-          </nav>
-
           <div className={`view-stage view-stage-${view}`} key={view}>
             <div className="view-stage-ornaments" aria-hidden="true">
               <span className="view-orb view-orb-a" />
@@ -1246,46 +1509,13 @@ export function AppDashboard({ user }: { user: User }) {
                 {activeSession ? (
                   <>
                     <div className="chat-stage-head">
-                      <div className="chat-stage-head-main">
-                        {activeSessionProgress ? (
-                          <div
-                            aria-label={`会谈进度 ${activeSessionProgress.percent}%`}
-                            className="session-progress-card"
-                          >
-                            <div className="session-progress-meta">
-                              <div>
-                                <strong>{activeSessionProgress.phaseLabel}</strong>
-                                <p>{activeSessionProgress.summary}</p>
-                              </div>
-                              <span>{activeSessionProgress.milestoneLabel}</span>
-                            </div>
-                            <div
-                              aria-valuemax={100}
-                              aria-valuemin={0}
-                              aria-valuenow={activeSessionProgress.percent}
-                              className="session-progress-track"
-                              role="progressbar"
-                            >
-                              <span
-                                className="session-progress-fill"
-                                style={{ width: `${activeSessionProgress.percent}%` }}
-                              />
-                            </div>
-                            <div className="session-progress-steps" aria-hidden="true">
-                              <span className={activeSessionProgress.percent >= 1 ? "is-active" : ""}>开始</span>
-                              <span className={activeSessionProgress.percent >= 24 ? "is-active" : ""}>展开</span>
-                              <span className={activeSessionProgress.percent >= 60 ? "is-active" : ""}>整理</span>
-                              <span className={activeSessionProgress.percent >= 86 ? "is-active" : ""}>收束</span>
-                            </div>
-                            <div className="session-progress-foot">
-                              <span>{activeSessionProgress.percent}%</span>
-                              <span>{activeSessionProgress.detailLabel}</span>
-                            </div>
-                          </div>
-                        ) : null}
+                      <div className="chat-stage-session-meta">
+                        <div className="header-session-signals chat-stage-session-signals">
+                          <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
+                          <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
+                        </div>
                       </div>
-
-                      <div className="stage-actions">
+                      <div className="stage-actions session-stage-actions">
                         {activeSession.status === "active" ? (
                           <button
                             className="primary-button"
@@ -1311,70 +1541,102 @@ export function AppDashboard({ user }: { user: User }) {
                       </div>
                     </div>
 
-                    <div className="message-stream" ref={streamRef}>
-                      {activeSession.messages.map((message) => (
-                        <article
-                          key={message.id}
-                          className={
-                            `${
-                              message.role === "user"
-                                ? "bubble bubble-user"
-                                : message.role === "assistant"
-                                  ? "bubble bubble-ai"
-                                  : "bubble bubble-support"
-                            }${message.animateIn ? " bubble-enter" : ""}`
-                          }
-                        >
-                          {message.role === "assistant" && message.isStreaming ? (
-                            <>
-                              <div className="bubble-head bubble-head-time-only">
-                                <time>{formatDateTime(message.createdAt)}</time>
-                              </div>
-                              {message.thinking ? (
-                                <div className="bubble-thinking bubble-thinking-live" aria-label="咨询师思考过程" title={message.thinking}>
-                                  <div className="thinking-dots" aria-hidden="true">
-                                    <span />
-                                    <span />
-                                    <span />
+                    <div className="chat-stage-scroll-shell">
+                      {progressCard ? (
+                        <div className="chat-stage-progress-overlay" ref={progressCardRef}>
+                          {progressCard}
+                        </div>
+                      ) : null}
+                      <div className="message-stream" ref={streamRef} onScroll={handleStreamScroll}>
+                        {activeSession.messages.map((message) => {
+                          const bubbleClassName =
+                            message.role === "user"
+                              ? "bubble bubble-user"
+                              : message.role === "assistant"
+                                ? "bubble bubble-ai"
+                                : "bubble bubble-support";
+                          const rowClassName =
+                            message.role === "user"
+                              ? "message-row message-row-user"
+                              : message.role === "assistant"
+                                ? "message-row message-row-ai"
+                                : "message-row message-row-support";
+
+                          return (
+                            <div className={rowClassName} key={message.id}>
+                              <article className={`${bubbleClassName}${message.animateIn ? " bubble-enter" : ""}`}>
+                                {message.role === "assistant" && message.isStreaming && !message.streamingDone ? (
+                                  <>
+                                    <div className="bubble-head bubble-head-time-only">
+                                      <time>{formatDateTime(message.createdAt)}</time>
+                                    </div>
+                                    <div className="thinking-panel">
+                                      <div className="bubble-thinking bubble-thinking-live" aria-label="咨询师思考中">
+                                        <div className="thinking-dots" aria-hidden="true">
+                                          <span />
+                                          <span />
+                                          <span />
+                                        </div>
+                                        <p className="thinking-inline">
+                                          {formatStreamingThinkingLine(message.rawThinking)}
+                                        </p>
+                                      </div>
+                                    </div>
+                                    {message.content ? <p>{message.content}</p> : null}
+                                  </>
+                                ) : message.content ? (
+                                  <>
+                                    <div className="bubble-head bubble-head-time-only">
+                                      <time>{formatDateTime(message.createdAt)}</time>
+                                    </div>
+                                    {message.role === "assistant" && message.rawThinking ? (
+                                      <div className="thinking-panel">
+                                        <button
+                                          aria-expanded={expandedThinkingIds.includes(message.id)}
+                                          className="bubble-thinking bubble-thinking-history thinking-toggle"
+                                          onClick={() => toggleThinkingExpanded(message.id)}
+                                          type="button"
+                                        >
+                                          <div className="thinking-copy">
+                                            <p className="thinking-label">查看咨询师思考记录</p>
+                                          </div>
+                                          <span
+                                            aria-hidden="true"
+                                            className={`thinking-chevron${
+                                              expandedThinkingIds.includes(message.id) ? " is-open" : ""
+                                            }`}
+                                          >
+                                            <ChevronDownIcon />
+                                          </span>
+                                        </button>
+                                        {expandedThinkingIds.includes(message.id) ? (
+                                          <div className="thinking-transcript" aria-label="完整思考记录">
+                                            <p>{message.rawThinking.trim()}</p>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    ) : null}
+                                    <p>{message.content}</p>
+                                  </>
+                                ) : (
+                                  <div className="bubble-thinking" aria-label="咨询师思考中">
+                                    <div className="thinking-dots" aria-hidden="true">
+                                      <span />
+                                      <span />
+                                      <span />
+                                    </div>
+                                    <p className="thinking-inline">咨询师思考中</p>
                                   </div>
-                                  <p className="thinking-inline">{formatThinkingLine(message.thinking)}</p>
-                                </div>
-                              ) : null}
-                              {message.content ? <p>{message.content}</p> : null}
-                              {!message.thinking && !message.content ? (
-                                <div className="bubble-thinking" aria-label="咨询师思考中">
-                                  <div className="thinking-dots" aria-hidden="true">
-                                    <span />
-                                    <span />
-                                    <span />
-                                  </div>
-                                  <p className="thinking-inline">在梳理你刚刚提到的重点</p>
-                                </div>
-                              ) : null}
-                            </>
-                          ) : message.content ? (
-                            <>
-                              <div className="bubble-head bubble-head-time-only">
-                                <time>{formatDateTime(message.createdAt)}</time>
-                              </div>
-                              <p>{message.content}</p>
-                            </>
-                          ) : (
-                            <div className="bubble-thinking" aria-label="咨询师思考中">
-                              <div className="thinking-dots" aria-hidden="true">
-                                <span />
-                                <span />
-                                <span />
-                              </div>
-                              <p className="thinking-inline">在梳理你刚刚提到的重点</p>
+                                )}
+                              </article>
                             </div>
-                          )}
-                        </article>
-                      ))}
+                          );
+                        })}
+                      </div>
                     </div>
 
                     {activeSession.status === "active" ? (
-                      <form className="composer composer-stage" onSubmit={sendMessage}>
+                      <form className="composer composer-stage" onSubmit={sendMessage} ref={composerRef}>
                         <div className="composer-input-shell">
                           <textarea
                             ref={composerTextareaRef}
@@ -1384,6 +1646,8 @@ export function AppDashboard({ user }: { user: User }) {
                             onChange={(event) => setMessageInput(event.target.value)}
                             onCompositionStart={() => setIsComposerComposing(true)}
                             onCompositionEnd={() => setIsComposerComposing(false)}
+                            onFocus={handleComposerFocus}
+                            onClick={handleComposerFocus}
                             onKeyDown={handleComposerKeyDown}
                           />
                           <button className="primary-button composer-submit" disabled={busy} type="submit">

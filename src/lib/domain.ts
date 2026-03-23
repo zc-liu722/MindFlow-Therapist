@@ -379,10 +379,10 @@ export async function appendMessageStream(
     title: session.title,
     mode: session.mode,
     messages: draftMessages,
-    onThinkingDelta(delta, rawThinking, liveSummary) {
+    onThinkingDelta(delta, rawThinking) {
       handlers?.onThinkingDelta?.({
         delta,
-        thinking: liveSummary,
+        thinking: rawThinking,
         rawThinking
       });
     },

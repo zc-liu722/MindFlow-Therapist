@@ -264,11 +264,7 @@ async function consumeAnthropicStream(
   response: Response,
   handlers?: {
     onTextDelta?: (delta: string, fullText: string) => void;
-    onThinkingDelta?: (
-      delta: string,
-      fullThinking: string,
-      liveSummary: string
-    ) => void;
+    onThinkingDelta?: (delta: string, fullThinking: string) => void;
   }
 ) {
   if (!response.body) {
@@ -281,7 +277,6 @@ async function consumeAnthropicStream(
   let buffer = "";
   let text = "";
   let thinking = "";
-  let lastThinkingSummary = "";
 
   function normalizeThinkingText(value: string) {
     return value
@@ -292,62 +287,9 @@ async function consumeAnthropicStream(
       .trim();
   }
 
-  function stripThinkingLead(value: string) {
-    return value
-      .replace(
-        /^(我(?:先|会|在|要|需要|应该)?|先|正在|需要先|需要|考虑先|考虑|想先|让我先|这里先|此处先)\s*/u,
-        ""
-      )
-      .replace(/^(回应时|回复时|此处|这里|接下来)\s*/u, "")
-      .replace(/^(要先|先看|先确认|先聚焦)\s*/u, "")
-      .trim();
-  }
-
-  function toThinkingClauses(value: string) {
-    return normalizeThinkingText(value)
-      .split(/[\n\r]+|(?<=[。！？；;])\s*/u)
-      .map((segment) => segment.trim())
-      .flatMap((segment) => segment.split(/\s{2,}|[，,]\s*/u))
-      .map((segment) => stripThinkingLead(segment))
-      .map((segment) => segment.replace(/[：:]\s*$/u, "").trim())
-      .filter((segment) => segment.length >= 2);
-  }
-
-  function buildLiveThinkingSummary(fullThinking: string) {
-    const clauses = toThinkingClauses(fullThinking);
-
-    if (clauses.length === 0) {
-      return "梳理你刚刚提到的重点";
-    }
-
-    const latest = clauses.at(-1) ?? "";
-    const previous = clauses.at(-2) ?? "";
-    const latestCompact = latest.replace(/[。！？；;，,]+$/u, "").trim();
-    const previousCompact = previous.replace(/[。！？；;，,]+$/u, "").trim();
-
-    if (!previousCompact || previousCompact === latestCompact) {
-      return latestCompact;
-    }
-
-    const shouldCarryPrevious =
-      latestCompact.length < 10 ||
-      /^(再|再看|同时|然后|并且|但|不过|如果|是否|以及|并)/u.test(latestCompact) ||
-      /^(是否|怎么|如何|要不要|能不能)/u.test(latestCompact);
-
-    const summary = shouldCarryPrevious
-      ? `${previousCompact}；${latestCompact}`
-      : latestCompact;
-
-    return summary.slice(0, 120).trim();
-  }
-
   function emitThinking(delta: string) {
     thinking += delta;
-    const liveSummary = buildLiveThinkingSummary(thinking);
-    if (liveSummary !== lastThinkingSummary) {
-      lastThinkingSummary = liveSummary;
-      handlers?.onThinkingDelta?.(delta, thinking, liveSummary);
-    }
+    handlers?.onThinkingDelta?.(delta, normalizeThinkingText(thinking));
   }
 
   function handleEvent(rawEvent: string) {
@@ -555,11 +497,7 @@ async function requestAnthropicText(input: {
   system: string;
   messages: AnthropicMessageInput[];
   onTextDelta?: (delta: string, fullText: string) => void;
-  onThinkingDelta?: (
-    delta: string,
-    fullThinking: string,
-    liveSummary: string
-  ) => void;
+  onThinkingDelta?: (delta: string, fullThinking: string) => void;
 }) {
   const config = getAnthropicConfig();
   const controller = new AbortController();
@@ -635,11 +573,7 @@ export async function generateTherapyReply(input: {
   mode: string;
   messages: ChatMessage[];
   onTextDelta?: (delta: string, fullText: string) => void;
-  onThinkingDelta?: (
-    delta: string,
-    fullThinking: string,
-    liveSummary: string
-  ) => void;
+  onThinkingDelta?: (delta: string, fullThinking: string) => void;
 }) {
   const themes = summarizeThemes(input.messages);
   const lastUserMessage =
