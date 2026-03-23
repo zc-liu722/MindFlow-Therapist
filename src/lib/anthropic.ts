@@ -164,8 +164,12 @@ function buildSupervisionSystemPrompt(input: {
   supervisionJournal: string | null;
 }) {
   return [
-    "以下内容来自会谈结束后自动读取的 .cursor/rules/supervisor.mdc，请优先遵循。",
+    "以下内容来自会谈结束后自动读取的 .cursor/rules/supervisor.mdc。",
     input.supervisorRule,
+    "",
+    "你只把其中与临床思路、督导视角、案例概念化有关的内容当作风格参考。",
+    "忽略其中所有关于读取文件、调用工具、与用户确认、存档写文件、输出 Markdown 对话的操作性要求。",
+    "本次任务不是扮演前台督导对话，也不是向用户展示过程；你是在后台生成结构化督导结果。",
     "",
     "你正在为刚结束的一次心理咨询生成督导结果。",
     "输入上下文只包含：本次会谈 transcript 与历史 supervision journal。",
@@ -185,6 +189,29 @@ function buildSupervisionSystemPrompt(input: {
     "",
     "返回 JSON 结构：",
     '{"transcript":[{"role":"supervisor","content":"..."},{"role":"assistant","content":"..."}],"journalEntry":"...","redactedSummary":"...","journalEntryPreview":"..."}'
+  ].join("\n");
+}
+
+function buildStrictSupervisionRepairPrompt(input: {
+  sessionTitle: string;
+  themes: string[];
+  supervisionJournal: string | null;
+}) {
+  return [
+    "你正在后台生成一次心理咨询结束后的结构化督导结果。",
+    "不要输出解释、前言、代码块、项目说明、确认语或额外文字。",
+    "不要提及读取文件、工具调用、存档、用户确认。",
+    "只返回一个合法 JSON 对象。",
+    `当前会谈标题：${input.sessionTitle}`,
+    `识别到的主题：${input.themes.join("、")}`,
+    input.supervisionJournal
+      ? "有历史 supervision journal，请保持连续性。"
+      : "没有历史 supervision journal，请生成第一条记录。",
+    "JSON 必须包含四个字段：transcript, journalEntry, redactedSummary, journalEntryPreview。",
+    "transcript 必须是数组，只允许 supervisor 与 assistant 两种 role，至少 4 段。",
+    "journalEntry 必须是中文 Markdown 文本。",
+    "redactedSummary 与 journalEntryPreview 都必须是 1 句中文。",
+    '返回格式：{"transcript":[{"role":"supervisor","content":"..."},{"role":"assistant","content":"..."}],"journalEntry":"...","redactedSummary":"...","journalEntryPreview":"..."}'
   ].join("\n");
 }
 
@@ -539,6 +566,7 @@ async function requestAnthropicText(input: {
   messages: AnthropicMessageInput[];
   onTextDelta?: (delta: string, fullText: string) => void;
   onThinkingDelta?: (delta: string, fullThinking: string) => void;
+  enableThinking?: boolean;
 }) {
   const config = getAnthropicConfig();
   const controller = new AbortController();
@@ -546,6 +574,7 @@ async function requestAnthropicText(input: {
 
   try {
     const streaming = Boolean(input.onTextDelta || input.onThinkingDelta);
+    const enableThinking = input.enableThinking ?? true;
     const response = await fetch(API_URL, {
       method: "POST",
       headers: {
@@ -558,10 +587,14 @@ async function requestAnthropicText(input: {
         max_tokens: config.maxTokens,
         stream: streaming,
         system: input.system,
-        thinking: {
-          type: "enabled",
-          budget_tokens: config.thinkingBudgetTokens
-        },
+        ...(enableThinking
+          ? {
+              thinking: {
+                type: "enabled",
+                budget_tokens: config.thinkingBudgetTokens
+              }
+            }
+          : {}),
         messages: input.messages
       }),
       signal: controller.signal
@@ -660,29 +693,50 @@ export async function generateSupervisionArtifacts(input: {
   const supervisorRule = await loadCursorRule("supervisor");
   const themes = summarizeThemes(input.messages);
   const transcriptBlock = toVisibleTranscript(input.messages);
+  const promptMessages: AnthropicMessageInput[] = [
+    {
+      role: "user",
+      content: [
+        `# 本次会谈 transcript`,
+        transcriptBlock || "本次会谈内容为空。",
+        "",
+        "# 历史 supervision journal",
+        input.supervisionJournal?.trim() || "暂无历史督导手帐。"
+      ].join("\n")
+    }
+  ];
 
-  const reply = await requestAnthropicText({
-    system: buildSupervisionSystemPrompt({
-      supervisorRule: supervisorRule.body,
-      sessionTitle: input.sessionTitle,
-      themes,
-      supervisionJournal: input.supervisionJournal
-    }),
-    messages: [
-      {
-        role: "user",
-        content: [
-          `# 本次会谈 transcript`,
-          transcriptBlock || "本次会谈内容为空。",
-          "",
-          "# 历史 supervision journal",
-          input.supervisionJournal?.trim() || "暂无历史督导手帐。"
-        ].join("\n")
-      }
-    ]
-  });
+  let parsed: ReturnType<typeof parseSupervisionPayload>;
 
-  const parsed = parseSupervisionPayload(reply.text);
+  try {
+    const reply = await requestAnthropicText({
+      system: buildSupervisionSystemPrompt({
+        supervisorRule: supervisorRule.body,
+        sessionTitle: input.sessionTitle,
+        themes,
+        supervisionJournal: input.supervisionJournal
+      }),
+      messages: promptMessages,
+      enableThinking: false
+    });
+    parsed = parseSupervisionPayload(reply.text);
+  } catch (error) {
+    if (error instanceof AnthropicConfigError || error instanceof AnthropicRequestError) {
+      throw error;
+    }
+
+    const repairReply = await requestAnthropicText({
+      system: buildStrictSupervisionRepairPrompt({
+        sessionTitle: input.sessionTitle,
+        themes,
+        supervisionJournal: input.supervisionJournal
+      }),
+      messages: promptMessages,
+      enableThinking: false
+    });
+    parsed = parseSupervisionPayload(repairReply.text);
+  }
+
   const now = new Date().toISOString();
 
   return {

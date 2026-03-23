@@ -545,6 +545,7 @@ export async function completeSession(user: UserRecord, sessionId: string) {
     return {
       sessionId: session.id,
       supervisionCreated: Boolean(session.supervisionId),
+      supervisionFailed: false,
       alreadyCompleted: true
     };
   }
@@ -554,6 +555,7 @@ export async function completeSession(user: UserRecord, sessionId: string) {
     return {
       sessionId: session.id,
       supervisionCreated: Boolean(session.supervisionId),
+      supervisionFailed: false,
       alreadyCompleted: true
     };
   }
@@ -584,51 +586,56 @@ export async function completeSession(user: UserRecord, sessionId: string) {
 
     let supervisionRun: SupervisionRunRecord | undefined;
     let supervisionJournal: SupervisionJournalRecord | undefined;
+    let supervisionFailed = false;
     let alreadyCompleted = false;
 
     if (session.autoSupervision) {
-      const supervisionJournalExisting = db.supervisionJournals.find(
-        (item) => item.userId === user.id
-      );
-      const supervisionOutput = await generateSupervisionArtifacts({
-        sessionTitle: session.title,
-        messages,
-        supervisionJournal: supervisionJournalExisting
-          ? decryptForUser(user.id, supervisionJournalExisting.content)
-          : null
-      });
-      supervisionRun = {
-        id: createId("supervision"),
-        userId: user.id,
-        sessionId: session.id,
-        status: "completed",
-        createdAt: new Date().toISOString(),
-        completedAt: new Date().toISOString(),
-        transcript: encryptForUser(user.id, JSON.stringify(supervisionOutput.transcript)),
-        journalEntry: encryptForUser(user.id, supervisionOutput.journalEntry),
-        redactedSummary: supervisionOutput.redactedSummary,
-        journalEntryPreview: supervisionOutput.journalEntryPreview
-      };
+      try {
+        const supervisionJournalExisting = db.supervisionJournals.find(
+          (item) => item.userId === user.id
+        );
+        const supervisionOutput = await generateSupervisionArtifacts({
+          sessionTitle: session.title,
+          messages,
+          supervisionJournal: supervisionJournalExisting
+            ? decryptForUser(user.id, supervisionJournalExisting.content)
+            : null
+        });
+        supervisionRun = {
+          id: createId("supervision"),
+          userId: user.id,
+          sessionId: session.id,
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          transcript: encryptForUser(user.id, JSON.stringify(supervisionOutput.transcript)),
+          journalEntry: encryptForUser(user.id, supervisionOutput.journalEntry),
+          redactedSummary: supervisionOutput.redactedSummary,
+          journalEntryPreview: supervisionOutput.journalEntryPreview
+        };
 
-      const mergedSupervision = mergeJournalContent(
-        supervisionJournalExisting
-          ? decryptForUser(user.id, supervisionJournalExisting.content)
-          : null,
-        supervisionOutput.journalEntry
-      );
+        const mergedSupervision = mergeJournalContent(
+          supervisionJournalExisting
+            ? decryptForUser(user.id, supervisionJournalExisting.content)
+            : null,
+          supervisionOutput.journalEntry
+        );
 
-      supervisionJournal = supervisionJournalExisting ?? {
-        id: createId("supervision_journal"),
-        userId: user.id,
-        updatedAt: new Date().toISOString(),
-        content: encryptForUser(user.id, mergedSupervision),
-        redactedSummary: supervisionOutput.redactedSummary
-      };
+        supervisionJournal = supervisionJournalExisting ?? {
+          id: createId("supervision_journal"),
+          userId: user.id,
+          updatedAt: new Date().toISOString(),
+          content: encryptForUser(user.id, mergedSupervision),
+          redactedSummary: supervisionOutput.redactedSummary
+        };
 
-      if (supervisionJournalExisting) {
-        supervisionJournal.updatedAt = new Date().toISOString();
-        supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
-        supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
+        if (supervisionJournalExisting) {
+          supervisionJournal.updatedAt = new Date().toISOString();
+          supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
+          supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
+        }
+      } catch {
+        supervisionFailed = true;
       }
     }
 
@@ -696,6 +703,7 @@ export async function completeSession(user: UserRecord, sessionId: string) {
       return {
         sessionId: session.id,
         supervisionCreated: Boolean(session.supervisionId),
+        supervisionFailed: false,
         alreadyCompleted: true
       };
     }
@@ -712,6 +720,7 @@ export async function completeSession(user: UserRecord, sessionId: string) {
     return {
       sessionId: session.id,
       supervisionCreated: Boolean(supervisionRun),
+      supervisionFailed,
       alreadyCompleted: false
     };
   } catch (error) {

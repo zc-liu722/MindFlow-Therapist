@@ -1380,6 +1380,7 @@ export function AppDashboard({ user }: { user: User }) {
         ? (JSON.parse(raw) as {
             error?: string;
             supervisionCreated?: boolean;
+            supervisionFailed?: boolean;
             alreadyCompleted?: boolean;
           })
         : {};
@@ -1402,7 +1403,9 @@ export function AppDashboard({ user }: { user: User }) {
         setNotice(
           payload.supervisionCreated
             ? "本次会谈已结束，并已自动生成督导记录。"
-            : "本次会谈已结束。"
+            : payload.supervisionFailed
+              ? "本次会谈已结束，但自动督导暂未生成成功。"
+              : "本次会谈已结束。"
         );
       }
       await loadSessions(targetSession.id);
