@@ -1,0 +1,28 @@
+{
+  "name": "ai-therapist-web",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "dev": "node scripts/run-with-node-compat.mjs dev",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p ${PORT:-3000}",
+    "lint": "next lint",
+    "smoke": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "next": "^15.3.8",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.21",
+    "@types/react": "19.1.5",
+    "@types/react-dom": "19.1.5",
+    "eslint": "^9.23.0",
+    "eslint-config-next": "^15.3.8",
+    "typescript": "5.8.3"
+  }
+}

@@ -1,0 +1,738 @@
+import { decryptForUser, encryptForUser, createId } from "@/lib/crypto";
+import {
+  preloadModeRules,
+  preloadTherapistCoreRule
+} from "@/lib/cursor-rules";
+import { readDb, writeDb } from "@/lib/db";
+import { buildTherapyJournal } from "@/lib/ai";
+import { generateSupervisionArtifacts, generateTherapyReply } from "@/lib/anthropic";
+import { normalizeSessionMode } from "@/lib/session-modes";
+import type {
+  AnalyticsEventRecord,
+  ChatMessage,
+  SupervisionJournalRecord,
+  SupervisionRunRecord,
+  TherapyJournalRecord,
+  TherapySessionRecord,
+  UserRecord
+} from "@/lib/types";
+
+function emptyTranscript(userId: string) {
+  return encryptForUser(userId, JSON.stringify([] satisfies ChatMessage[]));
+}
+
+function parseTranscript(session: TherapySessionRecord) {
+  return JSON.parse(decryptForUser(session.userId, session.transcript)) as ChatMessage[];
+}
+
+function isVisibleMessage(message: ChatMessage) {
+  return message.role !== "system";
+}
+
+function visibleMessages(messages: ChatMessage[]) {
+  return messages.filter(isVisibleMessage);
+}
+
+function parseTranscriptSafely(session: TherapySessionRecord) {
+  try {
+    return parseTranscript(session);
+  } catch {
+    return null;
+  }
+}
+
+function logEvent(user: UserRecord, type: AnalyticsEventRecord["type"], metadata: AnalyticsEventRecord["metadata"], sessionId?: string) {
+  const event: AnalyticsEventRecord = {
+    id: createId("evt"),
+    userHash: user.analyticsId,
+    type,
+    sessionId,
+    createdAt: new Date().toISOString(),
+    metadata
+  };
+
+  return writeDb((draft) => {
+    draft.analyticsEvents.push(event);
+  });
+}
+
+export async function listSessionsForUser(userId: string) {
+  const db = await readDb();
+  return db.therapySessions
+    .filter((session) => session.userId === userId)
+    .map((session) => ({
+      ...session,
+      mode: normalizeSessionMode(session.mode)
+    }))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export async function getSessionForUser(userId: string, sessionId: string) {
+  const db = await readDb();
+  const session = db.therapySessions.find(
+    (item) => item.id === sessionId && item.userId === userId
+  );
+  if (!session) {
+    throw new Error("NOT_FOUND");
+  }
+  return {
+    ...session,
+    mode: normalizeSessionMode(session.mode),
+    messageCount: visibleMessages(parseTranscript(session)).length,
+    messages: visibleMessages(parseTranscript(session))
+  };
+}
+
+function readJournalContentFromDb(
+  db: Awaited<ReturnType<typeof readDb>>,
+  userId: string,
+  journalType: "therapy" | "supervision"
+) {
+  const record =
+    journalType === "therapy"
+      ? db.therapyJournals.find((item) => item.userId === userId)
+      : db.supervisionJournals.find((item) => item.userId === userId);
+
+  if (!record) {
+    return null;
+  }
+
+  try {
+    return decryptForUser(userId, record.content);
+  } catch {
+    return null;
+  }
+}
+
+function buildSessionContextMessages(input: {
+  therapyJournal: string | null;
+  supervisionJournal: string | null;
+  modeRuleBodies: string[];
+}) {
+  const messages: ChatMessage[] = [];
+  const now = new Date().toISOString();
+
+  if (input.therapyJournal) {
+    messages.push({
+      id: createId("msg"),
+      role: "system",
+      content: `THERAPY_JOURNAL_CONTEXT\n${input.therapyJournal}`,
+      createdAt: now
+    });
+  }
+
+  if (input.supervisionJournal) {
+    messages.push({
+      id: createId("msg"),
+      role: "system",
+      content: `SUPERVISION_JOURNAL_CONTEXT\n${input.supervisionJournal}`,
+      createdAt: now
+    });
+  }
+
+  input.modeRuleBodies.forEach((ruleBody, index) => {
+    messages.push({
+      id: createId("msg"),
+      role: "system",
+      content: `MODE_RULE_CONTEXT_${index + 1}\n${ruleBody}`,
+      createdAt: now
+    });
+  });
+
+  return messages;
+}
+
+export async function createSession(
+  user: UserRecord,
+  input: { title: string; mode: string }
+) {
+  const normalizedMode = normalizeSessionMode(input.mode);
+  await preloadTherapistCoreRule();
+  const modeRules = await preloadModeRules(normalizedMode);
+  const db = await readDb();
+  const therapyJournal = readJournalContentFromDb(db, user.id, "therapy");
+  const supervisionJournal = readJournalContentFromDb(db, user.id, "supervision");
+  const contextMessages = buildSessionContextMessages({
+    therapyJournal,
+    supervisionJournal,
+    modeRuleBodies: modeRules.map((rule) => rule.body)
+  });
+  const initialMessages = [...contextMessages];
+  const now = new Date().toISOString();
+
+  const session: TherapySessionRecord = {
+    id: createId("session"),
+    userId: user.id,
+    title: input.title.trim(),
+    mode: normalizedMode,
+    status: "active",
+    autoSupervision: true,
+    createdAt: now,
+    updatedAt: now,
+    lastMessagePreview: "等待来访者开始",
+    redactedSummary: therapyJournal
+      ? "已加载历史咨询/督导上下文，等待来访者继续。"
+      : "已加载规则与历史上下文，等待来访者开始。",
+    messageCount: 0,
+    riskLevel: "low",
+    transcript: encryptForUser(user.id, JSON.stringify(initialMessages))
+  };
+
+  await writeDb((draft) => {
+    draft.therapySessions.push(session);
+  });
+  await logEvent(user, "session_created", { autoSupervision: true }, session.id);
+  return session;
+}
+
+function buildMergedTherapyJournalContent(
+  userId: string,
+  sessions: TherapySessionRecord[]
+) {
+  const completedSessions = sessions
+    .filter((session) => session.userId === userId && session.status === "completed")
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+
+  if (completedSessions.length === 0) {
+    return null;
+  }
+
+  const blocks = completedSessions
+    .map((session) => {
+      const messages = parseTranscriptSafely(session);
+      if (!messages) {
+        return null;
+      }
+      return buildTherapyJournal(messages, session.title);
+    })
+    .filter((block): block is ReturnType<typeof buildTherapyJournal> => Boolean(block));
+
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  const content = blocks.map((block) => block.content).join("\n\n---\n\n");
+
+  return {
+    updatedAt: new Date().toISOString(),
+    content: encryptForUser(userId, content),
+    redactedSummary: blocks[0]?.redactedSummary ?? "暂无摘要"
+  };
+}
+
+function buildMergedSupervisionArtifacts(
+  db: Awaited<ReturnType<typeof readDb>>,
+  userId: string,
+  sessions: TherapySessionRecord[]
+) {
+  const eligibleSessionIds = new Set(
+    sessions
+      .filter(
+        (session) =>
+          session.userId === userId && session.status === "completed" && session.autoSupervision
+      )
+      .map((session) => session.id)
+  );
+  const runs = db.supervisionRuns
+    .filter((run) => run.userId === userId && eligibleSessionIds.has(run.sessionId))
+    .sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+
+  if (runs.length === 0) {
+    return {
+      runs: [] as SupervisionRunRecord[],
+      journal: null
+    };
+  }
+
+  const journalEntries = runs
+    .map((run) => {
+      if (!run.journalEntry) {
+        return null;
+      }
+
+      try {
+        return decryptForUser(userId, run.journalEntry);
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry): entry is string => Boolean(entry));
+
+  return {
+    runs,
+    journal:
+      journalEntries.length > 0
+        ? {
+            updatedAt: new Date().toISOString(),
+            content: encryptForUser(userId, journalEntries.join("\n\n---\n\n")),
+            redactedSummary: runs[0]?.redactedSummary ?? "暂无摘要"
+          }
+        : null
+  };
+}
+
+export async function appendMessage(
+  user: UserRecord,
+  sessionId: string,
+  userContent: string
+) {
+  const db = await readDb();
+  const session = db.therapySessions.find(
+    (item) => item.id === sessionId && item.userId === user.id
+  );
+
+  if (!session) {
+    throw new Error("NOT_FOUND");
+  }
+  if (session.status !== "active") {
+    throw new Error("SESSION_CLOSED");
+  }
+
+  const transcript = parseTranscript(session);
+  const userMessage: ChatMessage = {
+    id: createId("msg"),
+    role: "user",
+    content: userContent.trim(),
+    createdAt: new Date().toISOString()
+  };
+
+  const draftMessages = [...transcript, userMessage];
+  const assistantOutput = await generateTherapyReply({
+    title: session.title,
+    mode: session.mode,
+    messages: draftMessages
+  });
+  const nextMessages = [...draftMessages, assistantOutput.message];
+  let persisted = false;
+
+  await writeDb((draft) => {
+    const mutableSession = draft.therapySessions.find((item) => item.id === sessionId);
+    if (!mutableSession) {
+      return;
+    }
+    if (mutableSession.status !== "active") {
+      return;
+    }
+
+    mutableSession.transcript = encryptForUser(user.id, JSON.stringify(nextMessages));
+    mutableSession.updatedAt = new Date().toISOString();
+    mutableSession.lastMessagePreview = assistantOutput.message.content.slice(0, 80);
+    mutableSession.redactedSummary = `近期聚焦 ${assistantOutput.themes.join("、")}。`;
+    mutableSession.messageCount = visibleMessages(nextMessages).length;
+    mutableSession.riskLevel = assistantOutput.riskLevel;
+    persisted = true;
+  });
+
+  if (!persisted) {
+    throw new Error("SESSION_CLOSED");
+  }
+
+  await logEvent(
+    user,
+    "message_sent",
+    { messageLength: userContent.length, riskLevel: assistantOutput.riskLevel },
+    sessionId
+  );
+
+  return {
+    userMessage,
+    assistantMessage: assistantOutput.message,
+    riskLevel: assistantOutput.riskLevel
+  };
+}
+
+export async function appendMessageStream(
+  user: UserRecord,
+  sessionId: string,
+  userContent: string,
+  handlers?: {
+    onThinkingDelta?: (payload: { delta: string; thinking: string }) => void;
+    onTextDelta?: (payload: { delta: string; content: string }) => void;
+  }
+) {
+  const db = await readDb();
+  const session = db.therapySessions.find(
+    (item) => item.id === sessionId && item.userId === user.id
+  );
+
+  if (!session) {
+    throw new Error("NOT_FOUND");
+  }
+  if (session.status !== "active") {
+    throw new Error("SESSION_CLOSED");
+  }
+
+  const transcript = parseTranscript(session);
+  const userMessage: ChatMessage = {
+    id: createId("msg"),
+    role: "user",
+    content: userContent.trim(),
+    createdAt: new Date().toISOString()
+  };
+
+  const draftMessages = [...transcript, userMessage];
+  const assistantOutput = await generateTherapyReply({
+    title: session.title,
+    mode: session.mode,
+    messages: draftMessages,
+    onThinkingDelta(delta, thinking) {
+      handlers?.onThinkingDelta?.({ delta, thinking });
+    },
+    onTextDelta(delta, content) {
+      handlers?.onTextDelta?.({ delta, content });
+    }
+  });
+  const nextMessages = [...draftMessages, assistantOutput.message];
+  let persisted = false;
+
+  await writeDb((draft) => {
+    const mutableSession = draft.therapySessions.find((item) => item.id === sessionId);
+    if (!mutableSession) {
+      return;
+    }
+    if (mutableSession.status !== "active") {
+      return;
+    }
+
+    mutableSession.transcript = encryptForUser(user.id, JSON.stringify(nextMessages));
+    mutableSession.updatedAt = new Date().toISOString();
+    mutableSession.lastMessagePreview = assistantOutput.message.content.slice(0, 80);
+    mutableSession.redactedSummary = `近期聚焦 ${assistantOutput.themes.join("、")}。`;
+    mutableSession.messageCount = visibleMessages(nextMessages).length;
+    mutableSession.riskLevel = assistantOutput.riskLevel;
+    persisted = true;
+  });
+
+  if (!persisted) {
+    throw new Error("SESSION_CLOSED");
+  }
+
+  await logEvent(
+    user,
+    "message_sent",
+    { messageLength: userContent.length, riskLevel: assistantOutput.riskLevel },
+    sessionId
+  );
+
+  return {
+    userMessage,
+    assistantMessage: assistantOutput.message,
+    riskLevel: assistantOutput.riskLevel
+  };
+}
+
+function mergeJournalContent(previous: string | null, nextBlock: string) {
+  if (!previous) {
+    return nextBlock;
+  }
+  return `${nextBlock}\n\n---\n\n${previous}`;
+}
+
+export async function completeSession(user: UserRecord, sessionId: string) {
+  const db = await readDb();
+  const session = db.therapySessions.find(
+    (item) => item.id === sessionId && item.userId === user.id
+  );
+
+  if (!session) {
+    throw new Error("NOT_FOUND");
+  }
+
+  if (session.status === "completed") {
+    return {
+      sessionId: session.id,
+      supervisionCreated: Boolean(session.supervisionId),
+      alreadyCompleted: true
+    };
+  }
+
+  const messages = parseTranscript(session);
+  const therapyJournalDraft = buildTherapyJournal(messages, session.title);
+  const therapyJournalExisting = db.therapyJournals.find((item) => item.userId === user.id);
+  const mergedTherapy = mergeJournalContent(
+    therapyJournalExisting
+      ? decryptForUser(user.id, therapyJournalExisting.content)
+      : null,
+    therapyJournalDraft.content
+  );
+
+  const therapyJournal: TherapyJournalRecord = therapyJournalExisting ?? {
+    id: createId("therapy_journal"),
+    userId: user.id,
+    updatedAt: new Date().toISOString(),
+    content: encryptForUser(user.id, mergedTherapy),
+    redactedSummary: therapyJournalDraft.redactedSummary
+  };
+
+  const hasExistingTherapyJournal = Boolean(therapyJournalExisting);
+
+  let supervisionRun: SupervisionRunRecord | undefined;
+  let supervisionJournal: SupervisionJournalRecord | undefined;
+  let alreadyCompleted = false;
+
+  if (session.autoSupervision) {
+    const supervisionJournalExisting = db.supervisionJournals.find(
+      (item) => item.userId === user.id
+    );
+    const supervisionOutput = await generateSupervisionArtifacts({
+      sessionTitle: session.title,
+      messages,
+      supervisionJournal: supervisionJournalExisting
+        ? decryptForUser(user.id, supervisionJournalExisting.content)
+        : null
+    });
+    supervisionRun = {
+      id: createId("supervision"),
+      userId: user.id,
+      sessionId: session.id,
+      status: "completed",
+      createdAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      transcript: encryptForUser(user.id, JSON.stringify(supervisionOutput.transcript)),
+      journalEntry: encryptForUser(user.id, supervisionOutput.journalEntry),
+      redactedSummary: supervisionOutput.redactedSummary,
+      journalEntryPreview: supervisionOutput.journalEntryPreview
+    };
+
+    const mergedSupervision = mergeJournalContent(
+      supervisionJournalExisting
+        ? decryptForUser(user.id, supervisionJournalExisting.content)
+        : null,
+      supervisionOutput.journalEntry
+    );
+
+    supervisionJournal = supervisionJournalExisting ?? {
+      id: createId("supervision_journal"),
+      userId: user.id,
+      updatedAt: new Date().toISOString(),
+      content: encryptForUser(user.id, mergedSupervision),
+      redactedSummary: supervisionOutput.redactedSummary
+    };
+
+    if (supervisionJournalExisting) {
+      supervisionJournal.updatedAt = new Date().toISOString();
+      supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
+      supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
+    }
+  }
+
+  if (therapyJournalExisting) {
+    therapyJournal.updatedAt = new Date().toISOString();
+    therapyJournal.content = encryptForUser(user.id, mergedTherapy);
+    therapyJournal.redactedSummary = therapyJournalDraft.redactedSummary;
+  }
+
+  await writeDb((draft) => {
+    const mutableSession = draft.therapySessions.find((item) => item.id === session.id);
+    if (!mutableSession) {
+      return;
+    }
+
+    if (mutableSession.status === "completed") {
+      alreadyCompleted = true;
+      return;
+    }
+
+    mutableSession.status = "completed";
+    mutableSession.completedAt = new Date().toISOString();
+    mutableSession.updatedAt = new Date().toISOString();
+    mutableSession.redactedSummary = therapyJournalDraft.redactedSummary;
+    if (supervisionRun) {
+      mutableSession.supervisionId = supervisionRun.id;
+    }
+
+    if (hasExistingTherapyJournal) {
+      const existing = draft.therapyJournals.find((item) => item.userId === user.id);
+      if (existing) {
+        existing.updatedAt = therapyJournal.updatedAt;
+        existing.content = therapyJournal.content;
+        existing.redactedSummary = therapyJournal.redactedSummary;
+      }
+    } else {
+      draft.therapyJournals.push(therapyJournal);
+    }
+
+    if (supervisionRun) {
+      draft.supervisionRuns.push(supervisionRun);
+    }
+
+    if (supervisionJournal) {
+      const existing = draft.supervisionJournals.find((item) => item.userId === user.id);
+      if (existing) {
+        existing.updatedAt = supervisionJournal.updatedAt;
+        existing.content = supervisionJournal.content;
+        existing.redactedSummary = supervisionJournal.redactedSummary;
+      } else {
+        draft.supervisionJournals.push(supervisionJournal);
+      }
+    }
+  });
+
+  if (alreadyCompleted) {
+    return {
+      sessionId: session.id,
+      supervisionCreated: Boolean(session.supervisionId),
+      alreadyCompleted: true
+    };
+  }
+
+  await logEvent(user, "session_completed", { autoSupervision: session.autoSupervision }, session.id);
+  if (session.autoSupervision) {
+    await logEvent(user, "supervision_completed", { sessionTitle: session.title }, session.id);
+  }
+
+  return {
+    sessionId: session.id,
+    supervisionCreated: Boolean(supervisionRun),
+    alreadyCompleted: false
+  };
+}
+
+export async function deleteSessionForUser(user: UserRecord, sessionId: string) {
+  const db = await readDb();
+  const session = db.therapySessions.find(
+    (item) => item.id === sessionId && item.userId === user.id
+  );
+
+  if (!session) {
+    throw new Error("NOT_FOUND");
+  }
+
+  const remainingSessions = db.therapySessions.filter(
+    (item) => !(item.id === sessionId && item.userId === user.id)
+  );
+  const nextTherapyJournal = buildMergedTherapyJournalContent(user.id, remainingSessions);
+  const nextSupervision = buildMergedSupervisionArtifacts(db, user.id, remainingSessions);
+
+  await writeDb((draft) => {
+    draft.therapySessions = draft.therapySessions.filter(
+      (item) => !(item.id === sessionId && item.userId === user.id)
+    );
+    draft.supervisionRuns = draft.supervisionRuns.filter(
+      (item) => !(item.userId === user.id && item.sessionId === sessionId)
+    );
+    draft.analyticsEvents = draft.analyticsEvents.filter(
+      (item) => !(item.userHash === user.analyticsId && item.sessionId === sessionId)
+    );
+
+    if (nextTherapyJournal) {
+      const existing = draft.therapyJournals.find((item) => item.userId === user.id);
+      if (existing) {
+        existing.updatedAt = nextTherapyJournal.updatedAt;
+        existing.content = nextTherapyJournal.content;
+        existing.redactedSummary = nextTherapyJournal.redactedSummary;
+      } else {
+        draft.therapyJournals.push({
+          id: createId("therapy_journal"),
+          userId: user.id,
+          updatedAt: nextTherapyJournal.updatedAt,
+          content: nextTherapyJournal.content,
+          redactedSummary: nextTherapyJournal.redactedSummary
+        });
+      }
+    } else {
+      draft.therapyJournals = draft.therapyJournals.filter((item) => item.userId !== user.id);
+    }
+
+    if (nextSupervision.journal) {
+      const existing = draft.supervisionJournals.find((item) => item.userId === user.id);
+      if (existing) {
+        existing.updatedAt = nextSupervision.journal.updatedAt;
+        existing.content = nextSupervision.journal.content;
+        existing.redactedSummary = nextSupervision.journal.redactedSummary;
+      } else {
+        draft.supervisionJournals.push({
+          id: createId("supervision_journal"),
+          userId: user.id,
+          updatedAt: nextSupervision.journal.updatedAt,
+          content: nextSupervision.journal.content,
+          redactedSummary: nextSupervision.journal.redactedSummary
+        });
+      }
+    } else {
+      draft.supervisionJournals = draft.supervisionJournals.filter((item) => item.userId !== user.id);
+    }
+
+    const userRunIds = new Set(nextSupervision.runs.map((item) => item.id));
+    draft.supervisionRuns = draft.supervisionRuns.filter(
+      (item) => item.userId !== user.id || userRunIds.has(item.id)
+    );
+    nextSupervision.runs.forEach((run) => {
+      const existing = draft.supervisionRuns.find((item) => item.id === run.id);
+      if (existing) {
+        existing.createdAt = run.createdAt;
+        existing.completedAt = run.completedAt;
+        existing.transcript = run.transcript;
+        existing.redactedSummary = run.redactedSummary;
+        existing.journalEntryPreview = run.journalEntryPreview;
+      } else {
+        draft.supervisionRuns.push(run);
+      }
+    });
+  });
+
+  return {
+    deletedSessionId: sessionId
+  };
+}
+
+export async function getTherapyJournal(userId: string) {
+  const db = await readDb();
+  const journal = db.therapyJournals.find((item) => item.userId === userId);
+  if (!journal) {
+    return {
+      updatedAt: null,
+      content: "还没有咨询师手帐。完成一次 session 后，这里会自动生成结构化记录。"
+    };
+  }
+
+  try {
+    return {
+      updatedAt: journal.updatedAt,
+      content: decryptForUser(userId, journal.content)
+    };
+  } catch {
+    return {
+      updatedAt: journal.updatedAt,
+      content: "当前手帐暂时无法读取，建议重新完成一次会谈后自动刷新。"
+    };
+  }
+}
+
+export async function getSupervisionJournal(userId: string) {
+  const db = await readDb();
+  const journal = db.supervisionJournals.find((item) => item.userId === userId);
+  const runs = db.supervisionRuns
+    .filter((item) => item.userId === userId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((item) => {
+      try {
+        return {
+          id: item.id,
+          sessionId: item.sessionId,
+          createdAt: item.createdAt,
+          completedAt: item.completedAt,
+          redactedSummary: item.redactedSummary,
+          transcript: JSON.parse(decryptForUser(userId, item.transcript)) as ChatMessage[]
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  let content = "还没有督导手帐。完成一次会谈后，这里会累积督导洞见。";
+  if (journal) {
+    try {
+      content = decryptForUser(userId, journal.content);
+    } catch {
+      content = "当前督导手帐暂时无法读取，后续完成会谈后会自动重建。";
+    }
+  }
+
+  return {
+    updatedAt: journal?.updatedAt ?? null,
+    content,
+    runs
+  };
+}

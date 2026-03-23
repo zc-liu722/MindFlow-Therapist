@@ -1,0 +1,15 @@
+/.next
+.vercel
+node_modules
+node_modules_broken
+.corepack
+.env
+.env.local
+.env.*.local
+data/db.json
+data/db.smoke-backup-*.json
+data/*.log
+.smoke-test.log
+.DS_Store
+*.tsbuildinfo
+npm-debug.log*
