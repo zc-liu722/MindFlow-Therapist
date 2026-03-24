@@ -243,6 +243,8 @@
 html,
 body {
   margin: 0;
+  padding: 0;
+  height: 100%;
   width: 100%;
   max-width: 100%;
   min-height: 100%;
@@ -270,6 +272,8 @@ body {
 
 body {
   position: relative;
+  min-width: 100%;
+  min-height: 100svh;
   min-height: 100dvh;
   overflow-x: clip;
   overscroll-behavior-y: none;
@@ -5117,7 +5121,7 @@ a {
   .app-shell.app-shell-chat-active .view-stage-chat {
     --chat-toolbar-offset: calc(env(safe-area-inset-top, 0px) + 4.5rem);
     --chat-composer-gap: 1rem;
-    --chat-progress-gap: 0.5rem;
+    --chat-progress-gap: 1rem;
     border-radius: 0;
     background: transparent;
   }
@@ -5136,6 +5140,10 @@ a {
     left: max(0.8rem, env(safe-area-inset-left, 0px));
     right: max(0.8rem, env(safe-area-inset-right, 0px));
     gap: 0.6rem;
+  }
+
+  .app-shell.app-shell-chat-active .chat-stage-progress-overlay {
+    top: calc(var(--chat-progress-gap, 0px) + 0.2rem);
   }
 
   .app-shell,
