@@ -540,8 +540,9 @@ export function AppDashboard({ user }: { user: User }) {
     textarea.style.height = "auto";
     const computed = window.getComputedStyle(textarea);
     const lineHeight = Number.parseFloat(computed.lineHeight) || 24;
+    const maxLines = Number.parseFloat(computed.getPropertyValue("--composer-max-lines")) || 4;
     const maxHeight =
-      lineHeight * 5 +
+      lineHeight * maxLines +
       Number.parseFloat(computed.paddingTop || "0") +
       Number.parseFloat(computed.paddingBottom || "0");
     const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
