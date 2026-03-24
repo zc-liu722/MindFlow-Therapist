@@ -6,6 +6,7 @@ import {
 import { readDb, writeDb } from "@/lib/db";
 import { buildTherapyJournal } from "@/lib/ai";
 import { generateSupervisionArtifacts, generateTherapyReply } from "@/lib/anthropic";
+import { createThinkingHumanizer } from "@/lib/moonshot";
 import { normalizeSessionMode } from "@/lib/session-modes";
 import { DEFAULT_SESSION_PACE, normalizeSessionPace } from "@/lib/session-pace";
 import type {
@@ -384,11 +385,10 @@ export async function appendMessageStream(
   user: UserRecord,
   sessionId: string,
   userContent: string,
+  language?: string | null,
   handlers?: {
-    onThinkingDelta?: (payload: {
-      delta: string;
-      thinking: string;
-      rawThinking: string;
+    onThinkingSummary?: (payload: {
+      summary: string;
     }) => void;
     onTextDelta?: (payload: { delta: string; content: string }) => void;
   }
@@ -406,6 +406,12 @@ export async function appendMessageStream(
   }
 
   const transcript = parseTranscript(session);
+  const thinkingHumanizer = createThinkingHumanizer({
+    language,
+    onSummary(summary) {
+      handlers?.onThinkingSummary?.({ summary });
+    }
+  });
   const userMessage: ChatMessage = {
     id: createId("msg"),
     role: "user",
@@ -420,17 +426,22 @@ export async function appendMessageStream(
     pace: normalizeSessionPace(session.pace),
     messages: draftMessages,
     onThinkingDelta(delta, rawThinking) {
-      handlers?.onThinkingDelta?.({
-        delta,
-        thinking: rawThinking,
-        rawThinking
-      });
+      void delta;
+      thinkingHumanizer.ingest(rawThinking);
     },
     onTextDelta(delta, content) {
       handlers?.onTextDelta?.({ delta, content });
     }
   });
-  const nextMessages = [...draftMessages, assistantOutput.message];
+  const humanizedThinking = await thinkingHumanizer.finalize(
+    assistantOutput.message.rawThinking ?? assistantOutput.message.thinking ?? ""
+  );
+  const assistantMessage: ChatMessage = {
+    ...assistantOutput.message,
+    thinking: humanizedThinking.summary,
+    rawThinking: humanizedThinking.transcript
+  };
+  const nextMessages = [...draftMessages, assistantMessage];
   let persisted = false;
 
   await writeDb((draft) => {
@@ -444,7 +455,7 @@ export async function appendMessageStream(
 
     mutableSession.transcript = encryptForUser(user.id, JSON.stringify(nextMessages));
     mutableSession.updatedAt = new Date().toISOString();
-    mutableSession.lastMessagePreview = assistantOutput.message.content.slice(0, 80);
+    mutableSession.lastMessagePreview = assistantMessage.content.slice(0, 80);
     mutableSession.redactedSummary = `近期聚焦 ${assistantOutput.themes.join("、")}。`;
     mutableSession.messageCount = visibleMessages(nextMessages).length;
     mutableSession.riskLevel = assistantOutput.riskLevel;
@@ -469,7 +480,7 @@ export async function appendMessageStream(
 
   return {
     userMessage,
-    assistantMessage: assistantOutput.message,
+    assistantMessage,
     riskLevel: assistantOutput.riskLevel
   };
 }

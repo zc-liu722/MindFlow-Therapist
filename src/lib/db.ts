@@ -23,7 +23,8 @@ const emptyDb: DatabaseShape = {
   therapyJournals: [],
   supervisionRuns: [],
   supervisionJournals: [],
-  analyticsEvents: []
+  analyticsEvents: [],
+  moderationIncidents: []
 };
 
 async function ensureDbFile() {
@@ -38,7 +39,20 @@ async function ensureDbFile() {
 export async function readDb(): Promise<DatabaseShape> {
   await ensureDbFile();
   const raw = await fs.readFile(dbPath, "utf8");
-  return JSON.parse(raw) as DatabaseShape;
+  const parsed = JSON.parse(raw) as Partial<DatabaseShape>;
+
+  return {
+    ...emptyDb,
+    ...parsed,
+    users: parsed.users ?? [],
+    authSessions: parsed.authSessions ?? [],
+    therapySessions: parsed.therapySessions ?? [],
+    therapyJournals: parsed.therapyJournals ?? [],
+    supervisionRuns: parsed.supervisionRuns ?? [],
+    supervisionJournals: parsed.supervisionJournals ?? [],
+    analyticsEvents: parsed.analyticsEvents ?? [],
+    moderationIncidents: parsed.moderationIncidents ?? []
+  };
 }
 
 export async function writeDb(updater: (db: DatabaseShape) => DatabaseShape | void) {

@@ -170,13 +170,7 @@ function formatStreamingThinkingLine(thinking?: string) {
   if (!normalized) {
     return "咨询师思考中";
   }
-
-  const previewLimit = 24;
-  const segments = Array.from(normalized);
-  const preview =
-    segments.length > previewLimit ? `…${segments.slice(-previewLimit).join("")}` : normalized;
-
-  return `咨询师思考中：${preview}`;
+  return normalized;
 }
 
 function isStreamNearBottom(element: HTMLDivElement) {
@@ -380,6 +374,7 @@ export function AppDashboard({ user }: { user: User }) {
   const router = useRouter();
   const streamRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
+  const lastStreamScrollTopRef = useRef(0);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
   const progressCardRef = useRef<HTMLDivElement | null>(null);
@@ -414,6 +409,7 @@ export function AppDashboard({ user }: { user: User }) {
   const [expandedThinkingIds, setExpandedThinkingIds] = useState<string[]>([]);
   const [paceBusy, setPaceBusy] = useState(false);
   const [pacePanelOpen, setPacePanelOpen] = useState(false);
+  const [mobileSessionBarCollapsed, setMobileSessionBarCollapsed] = useState(false);
 
   const activeSessionMeta =
     sessions.find((session) => session.id === selectedSessionId) ?? activeSession;
@@ -937,6 +933,8 @@ export function AppDashboard({ user }: { user: User }) {
     }
 
     shouldStickToBottomRef.current = true;
+    lastStreamScrollTopRef.current = 0;
+    setMobileSessionBarCollapsed(false);
   }, [activeSessionId, view]);
 
   useEffect(() => {
@@ -996,7 +994,25 @@ export function AppDashboard({ user }: { user: User }) {
   }, []);
 
   const handleStreamScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    shouldStickToBottomRef.current = isStreamNearBottom(event.currentTarget);
+    const stream = event.currentTarget;
+    const scrollTop = stream.scrollTop;
+    const previousScrollTop = lastStreamScrollTopRef.current;
+
+    shouldStickToBottomRef.current = isStreamNearBottom(stream);
+
+    if (window.innerWidth <= 780) {
+      const scrollingDown = scrollTop > previousScrollTop + 6;
+      const nearTop = scrollTop < 24;
+
+      if (nearTop) {
+        setMobileSessionBarCollapsed(false);
+      } else if (scrollingDown && scrollTop > 72) {
+        setMobileSessionBarCollapsed(true);
+        setPacePanelOpen(false);
+      }
+    }
+
+    lastStreamScrollTopRef.current = scrollTop;
   }, []);
 
   const toggleThinkingExpanded = useCallback((messageId: string) => {
@@ -1143,7 +1159,11 @@ export function AppDashboard({ user }: { user: User }) {
     try {
       const response = await fetch(`/api/sessions/${activeSession.id}/messages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-page-language":
+            document.documentElement.lang || navigator.language || "zh-CN"
+        },
         body: JSON.stringify({ content })
       });
 
@@ -1180,7 +1200,7 @@ export function AppDashboard({ user }: { user: User }) {
 
       function applyStreamEvent(eventItem: { type: string; payload: unknown }) {
         if (eventItem.type === "thinking") {
-          const payload = eventItem.payload as { thinking?: string; rawThinking?: string };
+          const payload = eventItem.payload as { summary?: string };
           setActiveSession((current) =>
             current
               ? {
@@ -1189,8 +1209,7 @@ export function AppDashboard({ user }: { user: User }) {
                     message.id === temporaryAssistantMessage.id
                       ? {
                           ...message,
-                          thinking: payload.thinking ?? message.thinking ?? "",
-                          rawThinking: payload.rawThinking ?? message.rawThinking ?? ""
+                          thinking: payload.summary ?? message.thinking ?? ""
                         }
                       : message
                   )
@@ -1300,7 +1319,7 @@ export function AppDashboard({ user }: { user: User }) {
                     animateIn: message.animateIn,
                     content: message.content,
                     thinking: message.thinking ?? assistantMessage.thinking,
-                    rawThinking: message.rawThinking ?? assistantMessage.rawThinking,
+                    rawThinking: assistantMessage.rawThinking,
                     streamTargetContent: assistantMessage.content,
                     isStreaming: true,
                     streamingDone: true
@@ -1530,7 +1549,7 @@ export function AppDashboard({ user }: { user: User }) {
   }
 
   return (
-    <main className="app-shell">
+    <main className={view === "chat" ? "app-shell app-shell-chat-active" : "app-shell"}>
       <div className="app-aurora app-aurora-left" />
       <div className="app-aurora app-aurora-right" />
       <div className="app-light-trail app-light-trail-left" />
@@ -1619,7 +1638,13 @@ export function AppDashboard({ user }: { user: User }) {
         </aside>
 
         <section className={sidebarOpen ? "experience-shell experience-shell-full sidebar-stage is-sidebar-open" : "experience-shell experience-shell-full sidebar-stage"}>
-          <header className="immersion-header">
+          <header
+            className={
+              view === "chat" && mobileSessionBarCollapsed
+                ? "immersion-header is-collapsed-mobile"
+                : "immersion-header"
+            }
+          >
             <div className="header-utility-row header-utility-row-main">
               <IconButton className="ghost-button sidebar-toggle" label="打开侧边栏" onClick={() => setSidebarOpen(true)}>
                 <MenuIcon />
@@ -1634,7 +1659,26 @@ export function AppDashboard({ user }: { user: User }) {
                 )}
               </div>
               {view === "chat" && activeSession ? (
-                <div className="session-floating-bar">
+                <div
+                  className={
+                    mobileSessionBarCollapsed
+                      ? "session-floating-bar is-collapsed-mobile"
+                      : "session-floating-bar"
+                  }
+                >
+                  <button
+                    aria-expanded={!mobileSessionBarCollapsed}
+                    aria-label="展开会谈操作栏"
+                    className="session-mobile-peek"
+                    onClick={() => setMobileSessionBarCollapsed(false)}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="session-mobile-peek-handle" />
+                    <span className="session-mobile-peek-copy">
+                      <strong>{activeSession.title}</strong>
+                      <span>{normalizeSessionMode(activeSession.mode)}</span>
+                    </span>
+                  </button>
                   <div className="chat-stage-session-meta">
                     <div className="header-session-signals chat-stage-session-signals">
                       <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
@@ -1792,7 +1836,7 @@ export function AppDashboard({ user }: { user: User }) {
                                         </div>
                                         <div className="thinking-inline-viewport">
                                           <span className="thinking-inline" aria-live="polite">
-                                            {formatStreamingThinkingLine(message.rawThinking)}
+                                            {formatStreamingThinkingLine(message.thinking)}
                                           </span>
                                         </div>
                                       </div>
@@ -1826,7 +1870,14 @@ export function AppDashboard({ user }: { user: User }) {
                                         </button>
                                         {expandedThinkingIds.includes(message.id) ? (
                                           <div className="thinking-transcript" aria-label="完整思考记录">
-                                            <p>{message.rawThinking.trim()}</p>
+                                            {message.rawThinking
+                                              .trim()
+                                              .split(/\n{2,}/)
+                                              .map((paragraph, index) => (
+                                                <p key={`${message.id}-thinking-${index}`}>
+                                                  {paragraph.trim()}
+                                                </p>
+                                              ))}
                                           </div>
                                         ) : null}
                                       </div>
@@ -1854,10 +1905,13 @@ export function AppDashboard({ user }: { user: User }) {
 
                     {activeSession.status === "active" ? (
                       <form className="composer composer-stage" onSubmit={sendMessage} ref={composerRef}>
+                        <p className="composer-guardrail-hint">
+                          仅支持与心理支持相关、真实且合规的表达；提示词攻击、灌水、违法违规或挪作他用将触发警告与限制。
+                        </p>
                         <div className="composer-input-shell">
                           <textarea
                             ref={composerTextareaRef}
-                            placeholder="输入消息..."
+                            placeholder="说说你此刻最想被理解的一件事..."
                             rows={1}
                             value={messageInput}
                             onChange={(event) => setMessageInput(event.target.value)}

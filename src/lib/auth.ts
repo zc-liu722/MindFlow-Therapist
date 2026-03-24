@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 
 import { createId, createPasswordHash, createRandomToken, hashText } from "@/lib/crypto";
 import { readDb, writeDb } from "@/lib/db";
+import { assertUserAccountAvailable, getEffectiveModerationState, syncUserModerationState } from "@/lib/guardrails";
 import { assertRequiredConsents, CONSENT_VERSION, validateConsentInput } from "@/lib/privacy";
 import type { AuthSessionRecord, Role, UserRecord } from "@/lib/types";
 
@@ -132,6 +133,14 @@ export async function loginUser(
     throw new Error("INVALID_CREDENTIALS");
   }
 
+  const moderationState = getEffectiveModerationState(existingUser);
+  if (moderationState.status !== "active") {
+    await syncUserModerationState(existingUser.id);
+    const refreshedDb = await readDb();
+    const refreshedUser = refreshedDb.users.find((item) => item.id === existingUser.id) ?? existingUser;
+    assertUserAccountAvailable(refreshedUser);
+  }
+
   if (requiredRole && existingUser.role !== requiredRole) {
     throw new Error("FORBIDDEN_ROLE");
   }
@@ -240,13 +249,25 @@ export async function getCurrentUser() {
     return null;
   }
 
+  const moderationState = getEffectiveModerationState(user);
+  let resolvedUser = user;
+  if (moderationState.status !== "active") {
+    await syncUserModerationState(user.id);
+    const refreshedDb = await readDb();
+    const refreshedUser = refreshedDb.users.find((item) => item.id === user.id) ?? user;
+    if (getEffectiveModerationState(refreshedUser).status !== "active") {
+      return null;
+    }
+    resolvedUser = refreshedUser;
+  }
+
   try {
-    assertRequiredConsents(user);
+    assertRequiredConsents(resolvedUser);
   } catch {
     return null;
   }
 
-  return user;
+  return resolvedUser;
 }
 
 export async function requireUser() {

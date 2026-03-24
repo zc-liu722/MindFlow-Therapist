@@ -14,9 +14,41 @@ type Overview = {
   completedSessions: number;
   supervisionRate: number;
   averageTurns: number;
+  moderationSummary: {
+    totalIncidents: number;
+    suspendedUsers: number;
+    bannedUsers: number;
+  };
   riskDistribution: { low: number; medium: number; high: number };
   sessionsByDay: { date: string; count: number }[];
   eventsByType: { type: string; count: number }[];
+  recentModerationIncidents: {
+    id: string;
+    userId: string;
+    username: string;
+    displayName: string;
+    sessionId?: string;
+    category: string;
+    action: string;
+    reason: string;
+    evidencePreview: string;
+    createdAt: string;
+  }[];
+  affectedAccounts: {
+    userId: string;
+    username: string;
+    displayName: string;
+    status: "active" | "suspended" | "banned";
+    statusLabel: string;
+    warningCount: number;
+    suspendedUntil?: string;
+    bannedAt?: string;
+    banReason?: string;
+    lastIncidentAt?: string;
+    incidentCount: number;
+    latestReason: string;
+    latestCategory: string;
+  }[];
 };
 
 function formatDateOnly(value?: string) {
@@ -32,18 +64,70 @@ function formatDateOnly(value?: string) {
   return `${year.slice(-2)}/${month}/${day}`;
 }
 
+function formatDateTime(value?: string) {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const year = String(date.getFullYear()).slice(-2);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+
+  return `${year}/${month}/${day} ${hour}:${minute}`;
+}
+
 export function AdminDashboard({ user }: { user: User }) {
   const router = useRouter();
   const [overview, setOverview] = useState<Overview | null>(null);
+  const [notice, setNotice] = useState("");
+  const [busyAction, setBusyAction] = useState("");
+
+  async function loadOverview() {
+    const response = await fetch("/api/admin/overview");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as Overview;
+    setOverview(payload);
+  }
+
+  async function runModerationAction(userId: string, action: "reinstate" | "clear_warnings") {
+    const key = `${action}:${userId}`;
+    setBusyAction(key);
+    setNotice("");
+
+    try {
+      const response = await fetch("/api/admin/moderation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, action })
+      });
+
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        setNotice(payload.error ?? "操作失败");
+        return;
+      }
+
+      setNotice(action === "reinstate" ? "已恢复该账号访问权限" : "已清零该账号警告计数");
+      await loadOverview();
+    } catch {
+      setNotice("操作失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
 
   useEffect(() => {
     void (async () => {
-      const response = await fetch("/api/admin/overview");
-      if (!response.ok) {
-        return;
-      }
-      const payload = (await response.json()) as Overview;
-      setOverview(payload);
+      await loadOverview();
     })();
   }, []);
 
@@ -90,9 +174,99 @@ export function AdminDashboard({ user }: { user: User }) {
           <span>平均轮数</span>
           <strong>{overview?.averageTurns ?? "-"}</strong>
         </article>
+        <article className="metric-card">
+          <span>违规事件</span>
+          <strong>{overview?.moderationSummary.totalIncidents ?? "-"}</strong>
+        </article>
+        <article className="metric-card">
+          <span>限制中账号</span>
+          <strong>{overview?.moderationSummary.suspendedUsers ?? "-"}</strong>
+        </article>
+        <article className="metric-card">
+          <span>封禁账号</span>
+          <strong>{overview?.moderationSummary.bannedUsers ?? "-"}</strong>
+        </article>
       </section>
 
+      {notice ? <div className="notice">{notice}</div> : null}
+
       <section className="admin-panels">
+        <article className="chart-card">
+          <h3>受影响账号</h3>
+          <div className="mini-table">
+            {overview?.affectedAccounts.length ? (
+              overview.affectedAccounts.map((account) => {
+                const reinstateKey = `reinstate:${account.userId}`;
+                const clearWarningsKey = `clear_warnings:${account.userId}`;
+
+                return (
+                  <div className="moderation-account-card" key={account.userId}>
+                    <div className="moderation-account-head">
+                      <div>
+                        <strong>{account.displayName}</strong>
+                        <p>@{account.username}</p>
+                      </div>
+                      <span className={`privacy-badge moderation-badge moderation-${account.status}`}>
+                        {account.statusLabel}
+                      </span>
+                    </div>
+                    <p className="muted">
+                      警告 {account.warningCount} 次，事件 {account.incidentCount} 条
+                    </p>
+                    <p>{account.latestReason || "暂无最近说明"}</p>
+                    <p className="muted">
+                      最近分类：{account.latestCategory || "-"} · 最近触发：{formatDateOnly(account.lastIncidentAt)}
+                    </p>
+                    <div className="admin-inline-actions">
+                      <button
+                        className="ghost-button"
+                        disabled={busyAction === reinstateKey || account.status === "active"}
+                        onClick={() => void runModerationAction(account.userId, "reinstate")}
+                        type="button"
+                      >
+                        {busyAction === reinstateKey ? "处理中..." : "恢复访问"}
+                      </button>
+                      <button
+                        className="ghost-button"
+                        disabled={busyAction === clearWarningsKey || account.warningCount === 0}
+                        onClick={() => void runModerationAction(account.userId, "clear_warnings")}
+                        type="button"
+                      >
+                        {busyAction === clearWarningsKey ? "处理中..." : "清零警告"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <p className="muted">暂无需要处理的账号</p>
+            )}
+          </div>
+        </article>
+
+        <article className="chart-card">
+          <h3>违规事件流</h3>
+          <div className="mini-table">
+            {overview?.recentModerationIncidents.length ? (
+              overview.recentModerationIncidents.map((incident) => (
+                <div className="moderation-incident-row" key={incident.id}>
+                  <div className="moderation-incident-head">
+                    <strong>{incident.displayName}</strong>
+                    <span>{formatDateTime(incident.createdAt)}</span>
+                  </div>
+                  <p>
+                    @{incident.username} · {incident.category} · {incident.action}
+                  </p>
+                  <p>{incident.reason}</p>
+                  <p className="muted">输入摘录：{incident.evidencePreview || "-"}</p>
+                </div>
+              ))
+            ) : (
+              <p className="muted">暂无违规记录</p>
+            )}
+          </div>
+        </article>
+
         <article className="chart-card">
           <h3>风险等级分布</h3>
           <div className="risk-bars">
@@ -152,6 +326,7 @@ export function AdminDashboard({ user }: { user: User }) {
             <li>管理员查询只命中聚合统计接口</li>
             <li>聊天、手帐、督导原文统一按用户加密</li>
             <li>统计数据只保留匿名 ID、计数与流程事件</li>
+            <li>违规后台仅展示事件摘要，不暴露完整聊天原文</li>
             <li>适合后续接数据库、任务队列与 KMS 升级</li>
           </ul>
         </article>

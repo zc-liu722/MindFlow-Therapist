@@ -8,6 +8,25 @@ export type SessionStatus = "active" | "completed";
 
 export type RiskLevel = "low" | "medium" | "high";
 
+export type AccountStatus = "active" | "suspended" | "banned";
+
+export type ModerationCategory =
+  | "prompt_attack"
+  | "meaningless_input"
+  | "policy_violation"
+  | "off_topic_api_abuse";
+
+export type ModerationAction = "warn" | "suspend_1h" | "ban";
+
+export interface UserModerationState {
+  status: AccountStatus;
+  warningCount: number;
+  suspendedUntil?: string;
+  bannedAt?: string;
+  banReason?: string;
+  lastIncidentAt?: string;
+}
+
 export interface EncryptedBlob {
   iv: string;
   content: string;
@@ -25,6 +44,7 @@ export interface UserRecord {
   consentVersion?: string;
   privacyConsentAt?: string;
   aiProcessingConsentAt?: string;
+  moderation?: UserModerationState;
   createdAt: string;
 }
 
@@ -104,10 +124,24 @@ export interface AnalyticsEventRecord {
     | "session_created"
     | "message_sent"
     | "session_completed"
-    | "supervision_completed";
+    | "supervision_completed"
+    | "moderation_warned"
+    | "account_suspended"
+    | "account_banned";
   createdAt: string;
   sessionId?: string;
   metadata: Record<string, string | number | boolean>;
+}
+
+export interface ModerationIncidentRecord {
+  id: string;
+  userId: string;
+  sessionId?: string;
+  category: ModerationCategory;
+  action: ModerationAction;
+  reason: string;
+  evidencePreview: string;
+  createdAt: string;
 }
 
 export interface DatabaseShape {
@@ -118,4 +152,5 @@ export interface DatabaseShape {
   supervisionRuns: SupervisionRunRecord[];
   supervisionJournals: SupervisionJournalRecord[];
   analyticsEvents: AnalyticsEventRecord[];
+  moderationIncidents: ModerationIncidentRecord[];
 }

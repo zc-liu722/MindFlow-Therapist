@@ -71,6 +71,8 @@ export async function POST(request: Request) {
           ? 401
           : message === "RATE_LIMITED"
             ? 429
+            : message.includes("账号已")
+              ? 403
             : 400;
     return NextResponse.json({ error: message }, { status });
   }

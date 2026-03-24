@@ -164,12 +164,8 @@ function buildSupervisionSystemPrompt(input: {
   supervisionJournal: string | null;
 }) {
   return [
-    "以下内容来自会谈结束后自动读取的 .cursor/rules/supervisor.mdc。",
+    "以下内容来自会谈结束后自动读取的 .cursor/rules/supervisor.mdc，请优先遵循。",
     input.supervisorRule,
-    "",
-    "你只把其中与临床思路、督导视角、案例概念化有关的内容当作风格参考。",
-    "忽略其中所有关于读取文件、调用工具、与用户确认、存档写文件、输出 Markdown 对话的操作性要求。",
-    "本次任务不是扮演前台督导对话，也不是向用户展示过程；你是在后台生成结构化督导结果。",
     "",
     "你正在为刚结束的一次心理咨询生成督导结果。",
     "输入上下文只包含：本次会谈 transcript 与历史 supervision journal。",
@@ -198,9 +194,8 @@ function buildStrictSupervisionRepairPrompt(input: {
   supervisionJournal: string | null;
 }) {
   return [
-    "你正在后台生成一次心理咨询结束后的结构化督导结果。",
-    "不要输出解释、前言、代码块、项目说明、确认语或额外文字。",
-    "不要提及读取文件、工具调用、存档、用户确认。",
+    "你正在整理一份已经生成过的督导草稿，将其转换成可落库的结构化 JSON。",
+    "你不需要重新解释任务，也不要输出前言、后记、代码块或额外说明。",
     "只返回一个合法 JSON 对象。",
     `当前会谈标题：${input.sessionTitle}`,
     `识别到的主题：${input.themes.join("、")}`,
@@ -566,7 +561,6 @@ async function requestAnthropicText(input: {
   messages: AnthropicMessageInput[];
   onTextDelta?: (delta: string, fullText: string) => void;
   onThinkingDelta?: (delta: string, fullThinking: string) => void;
-  enableThinking?: boolean;
 }) {
   const config = getAnthropicConfig();
   const controller = new AbortController();
@@ -574,7 +568,6 @@ async function requestAnthropicText(input: {
 
   try {
     const streaming = Boolean(input.onTextDelta || input.onThinkingDelta);
-    const enableThinking = input.enableThinking ?? true;
     const response = await fetch(API_URL, {
       method: "POST",
       headers: {
@@ -587,14 +580,10 @@ async function requestAnthropicText(input: {
         max_tokens: config.maxTokens,
         stream: streaming,
         system: input.system,
-        ...(enableThinking
-          ? {
-              thinking: {
-                type: "enabled",
-                budget_tokens: config.thinkingBudgetTokens
-              }
-            }
-          : {}),
+        thinking: {
+          type: "enabled",
+          budget_tokens: config.thinkingBudgetTokens
+        },
         messages: input.messages
       }),
       signal: controller.signal
@@ -707,6 +696,7 @@ export async function generateSupervisionArtifacts(input: {
   ];
 
   let parsed: ReturnType<typeof parseSupervisionPayload>;
+  let rawReplyText = "";
 
   try {
     const reply = await requestAnthropicText({
@@ -716,9 +706,9 @@ export async function generateSupervisionArtifacts(input: {
         themes,
         supervisionJournal: input.supervisionJournal
       }),
-      messages: promptMessages,
-      enableThinking: false
+      messages: promptMessages
     });
+    rawReplyText = reply.text;
     parsed = parseSupervisionPayload(reply.text);
   } catch (error) {
     if (error instanceof AnthropicConfigError || error instanceof AnthropicRequestError) {
@@ -731,8 +721,19 @@ export async function generateSupervisionArtifacts(input: {
         themes,
         supervisionJournal: input.supervisionJournal
       }),
-      messages: promptMessages,
-      enableThinking: false
+      messages: [
+        {
+          role: "user",
+          content: [
+            "下面是一次督导生成的原始输出，请将其整理为严格 JSON。",
+            "如果原始输出中存在自然语言说明、Markdown 代码块、分隔线或角色对话，请提取其中有效内容并映射到目标字段。",
+            "如果 transcript 缺失或不完整，请根据原始草稿里的督导思路补全为至少 4 段 supervisor/assistant 交替内容。",
+            "",
+            "# 原始输出",
+            rawReplyText || "原始输出为空。"
+          ].join("\n")
+        }
+      ]
     });
     parsed = parseSupervisionPayload(repairReply.text);
   }

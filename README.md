@@ -85,6 +85,10 @@ ANTHROPIC_API_KEY=your-anthropic-api-key
 ANTHROPIC_MODEL=claude-opus-4-6
 ANTHROPIC_MAX_OUTPUT_TOKENS=4096
 ANTHROPIC_THINKING_BUDGET_TOKENS=2048
+MOONSHOT_API_KEY=your-moonshot-api-key
+MOONSHOT_BASE_URL=https://api.moonshot.cn/v1
+MOONSHOT_MODEL=kimi-k2.5
+MOONSHOT_TIMEOUT_MS=20000
 COOKIE_SECURE=false
 ```
 
@@ -94,6 +98,7 @@ COOKIE_SECURE=false
 - `APP_ENCRYPTION_KEY` 用于敏感本地数据加密
 - `ADMIN_INVITE_CODE` 控制管理员注册
 - `ANTHROPIC_*` 变量用于配置模型与生成参数
+- `MOONSHOT_*` 变量用于配置思考过程的人性化转译模型
 - `COOKIE_SECURE=false` 适合本机联调或特殊代理环境
 
 ## 项目结构
