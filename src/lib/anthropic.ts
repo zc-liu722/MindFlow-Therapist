@@ -9,6 +9,9 @@ const DEFAULT_MODEL = "claude-opus-4-6";
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_THINKING_BUDGET = 2048;
 const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_SUPERVISION_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_SUPERVISION_TIMEOUT_MS = 180_000;
+const DEFAULT_SUPERVISION_MAX_TOKENS = 3072;
 const DEFAULT_API_VERSION = "2023-06-01";
 const API_URL = "https://api.anthropic.com/v1/messages";
 
@@ -278,16 +281,112 @@ function extractJsonBlock(text: string) {
   }
 
   const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    return text.slice(start, end + 1);
+  if (start >= 0) {
+    let inString = false;
+    let escaped = false;
+    let depth = 0;
+
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) {
+        continue;
+      }
+
+      if (char === "{") {
+        depth += 1;
+        continue;
+      }
+
+      if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          return text.slice(start, index + 1).trim();
+        }
+      }
+    }
   }
 
   return text.trim();
 }
 
+function escapeJsonControlCharactersInStrings(text: string) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (const char of text) {
+    if (escaped) {
+      result += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      result += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === "\"") {
+      result += char;
+      inString = !inString;
+      continue;
+    }
+
+    if (!inString) {
+      result += char;
+      continue;
+    }
+
+    if (char === "\n") {
+      result += "\\n";
+      continue;
+    }
+
+    if (char === "\r") {
+      result += "\\r";
+      continue;
+    }
+
+    if (char === "\t") {
+      result += "\\t";
+      continue;
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
 function parseSupervisionPayload(raw: string) {
-  const payload = JSON.parse(extractJsonBlock(raw)) as GeneratedSupervisionPayload;
+  const jsonBlock = extractJsonBlock(raw);
+  let payload: GeneratedSupervisionPayload;
+
+  try {
+    payload = JSON.parse(jsonBlock) as GeneratedSupervisionPayload;
+  } catch {
+    payload = JSON.parse(
+      escapeJsonControlCharactersInStrings(jsonBlock)
+    ) as GeneratedSupervisionPayload;
+  }
+
   const transcript = Array.isArray(payload.transcript)
     ? payload.transcript
         .filter(
@@ -464,6 +563,20 @@ function getAnthropicConfig() {
   };
 }
 
+function getSupervisionRequestConfig() {
+  return {
+    model: process.env.ANTHROPIC_SUPERVISION_MODEL?.trim() || DEFAULT_SUPERVISION_MODEL,
+    maxTokens: positiveIntFromEnv(
+      process.env.ANTHROPIC_SUPERVISION_MAX_OUTPUT_TOKENS,
+      DEFAULT_SUPERVISION_MAX_TOKENS
+    ),
+    timeoutMs: positiveIntFromEnv(
+      process.env.ANTHROPIC_SUPERVISION_TIMEOUT_MS,
+      DEFAULT_SUPERVISION_TIMEOUT_MS
+    )
+  };
+}
+
 function classifyAnthropicError(
   parsed: ParsedAnthropicError,
   status: number,
@@ -561,10 +674,20 @@ async function requestAnthropicText(input: {
   messages: AnthropicMessageInput[];
   onTextDelta?: (delta: string, fullText: string) => void;
   onThinkingDelta?: (delta: string, fullThinking: string) => void;
+  model?: string;
+  timeoutMs?: number;
+  maxTokens?: number;
+  thinkingBudgetTokens?: number;
+  enableThinking?: boolean;
 }) {
   const config = getAnthropicConfig();
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+  const model = input.model?.trim() || config.model;
+  const timeoutMs = input.timeoutMs ?? config.timeoutMs;
+  const maxTokens = input.maxTokens ?? config.maxTokens;
+  const thinkingBudgetTokens = input.thinkingBudgetTokens ?? config.thinkingBudgetTokens;
+  const enableThinking = input.enableThinking ?? true;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const streaming = Boolean(input.onTextDelta || input.onThinkingDelta);
@@ -576,14 +699,18 @@ async function requestAnthropicText(input: {
         "x-api-key": config.apiKey
       },
       body: JSON.stringify({
-        model: config.model,
-        max_tokens: config.maxTokens,
+        model,
+        max_tokens: maxTokens,
         stream: streaming,
         system: input.system,
-        thinking: {
-          type: "enabled",
-          budget_tokens: config.thinkingBudgetTokens
-        },
+        ...(enableThinking
+          ? {
+              thinking: {
+                type: "enabled",
+                budget_tokens: thinkingBudgetTokens
+              }
+            }
+          : {}),
         messages: input.messages
       }),
       signal: controller.signal
@@ -591,8 +718,8 @@ async function requestAnthropicText(input: {
 
     if (!response.ok) {
       const message = await readErrorMessage(response, {
-        model: config.model,
-        thinkingBudgetTokens: config.thinkingBudgetTokens
+        model,
+        thinkingBudgetTokens
       });
       throw new AnthropicRequestError(message, response.status);
     }
@@ -680,6 +807,7 @@ export async function generateSupervisionArtifacts(input: {
   supervisionJournal: string | null;
 }) {
   const supervisorRule = await loadCursorRule("supervisor");
+  const supervisionConfig = getSupervisionRequestConfig();
   const themes = summarizeThemes(input.messages);
   const transcriptBlock = toVisibleTranscript(input.messages);
   const promptMessages: AnthropicMessageInput[] = [
@@ -699,15 +827,21 @@ export async function generateSupervisionArtifacts(input: {
   let rawReplyText = "";
 
   try {
-    const reply = await requestAnthropicText({
-      system: buildSupervisionSystemPrompt({
-        supervisorRule: supervisorRule.body,
-        sessionTitle: input.sessionTitle,
-        themes,
-        supervisionJournal: input.supervisionJournal
-      }),
-      messages: promptMessages
+    const system = buildSupervisionSystemPrompt({
+      supervisorRule: supervisorRule.body,
+      sessionTitle: input.sessionTitle,
+      themes,
+      supervisionJournal: input.supervisionJournal
     });
+    const reply = await requestAnthropicText({
+      system,
+      messages: promptMessages,
+      model: supervisionConfig.model,
+      timeoutMs: supervisionConfig.timeoutMs,
+      maxTokens: supervisionConfig.maxTokens,
+      enableThinking: false
+    });
+
     rawReplyText = reply.text;
     parsed = parseSupervisionPayload(reply.text);
   } catch (error) {
@@ -721,6 +855,10 @@ export async function generateSupervisionArtifacts(input: {
         themes,
         supervisionJournal: input.supervisionJournal
       }),
+      model: supervisionConfig.model,
+      timeoutMs: supervisionConfig.timeoutMs,
+      maxTokens: supervisionConfig.maxTokens,
+      enableThinking: false,
       messages: [
         {
           role: "user",

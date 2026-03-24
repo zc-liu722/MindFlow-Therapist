@@ -85,6 +85,9 @@ ANTHROPIC_API_KEY=your-anthropic-api-key
 ANTHROPIC_MODEL=claude-opus-4-6
 ANTHROPIC_MAX_OUTPUT_TOKENS=4096
 ANTHROPIC_THINKING_BUDGET_TOKENS=2048
+ANTHROPIC_SUPERVISION_MODEL=claude-sonnet-4-20250514
+ANTHROPIC_SUPERVISION_TIMEOUT_MS=180000
+ANTHROPIC_SUPERVISION_MAX_OUTPUT_TOKENS=3072
 MOONSHOT_API_KEY=your-moonshot-api-key
 MOONSHOT_BASE_URL=https://api.moonshot.cn/v1
 MOONSHOT_MODEL=kimi-k2.5
@@ -97,7 +100,7 @@ COOKIE_SECURE=false
 - `DATA_DIR` 用于指定数据文件目录；本地开发可留空
 - `APP_ENCRYPTION_KEY` 用于敏感本地数据加密
 - `ADMIN_INVITE_CODE` 控制管理员注册
-- `ANTHROPIC_*` 变量用于配置模型与生成参数
+- `ANTHROPIC_*` 变量用于配置模型与生成参数；其中 `ANTHROPIC_SUPERVISION_*` 可单独调节督导生成使用的模型与超时等参数，当前默认关闭督导 thinking 并改用 Sonnet
 - `MOONSHOT_*` 变量用于配置思考过程的人性化转译模型
 - `COOKIE_SECURE=false` 适合本机联调或特殊代理环境
 

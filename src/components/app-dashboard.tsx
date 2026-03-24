@@ -17,7 +17,6 @@ import { estimateSessionProgress } from "@/lib/session-progress";
 import {
   DEFAULT_SESSION_MODE,
   SESSION_MODE_CATALOG,
-  SESSION_MODE_OPTIONS,
   normalizeSessionMode,
   type SessionMode
 } from "@/lib/session-modes";
@@ -48,6 +47,8 @@ type SessionRecord = {
   messageCount: number;
   riskLevel: "low" | "medium" | "high";
   supervisionId?: string;
+  supervisionFailureReason?: string;
+  supervisionFailedAt?: string;
 };
 
 type ChatMessage = {
@@ -57,7 +58,6 @@ type ChatMessage = {
   createdAt: string;
   thinking?: string;
   rawThinking?: string;
-  streamTargetContent?: string;
   isStreaming?: boolean;
   streamingDone?: boolean;
   animateIn?: boolean;
@@ -80,13 +80,6 @@ type ViewMode = "chat" | "history" | "therapy" | "supervision";
 type ThemePreference = "system" | "light" | "dark";
 
 const THEME_STORAGE_KEY = "mindflow-theme-preference";
-
-const MODE_PICKER_ITEM_HEIGHT = 76;
-const MODE_PICKER_VISIBLE_ROWS = 3;
-const MODE_PICKER_SPACER_HEIGHT = (MODE_PICKER_ITEM_HEIGHT * (MODE_PICKER_VISIBLE_ROWS - 1)) / 2;
-const MODE_PICKER_MAX_DISTANCE = 2.75;
-const MODE_PICKER_SCROLL_END_DELAY = 220;
-const MODE_PICKER_SNAP_DURATION = 1000;
 
 function formatDateTime(value?: string) {
   if (!value) {
@@ -126,43 +119,6 @@ function getNextSessionTitle(sessions: SessionRecord[]) {
   }, 0);
 
   return `第${highestIndex + 1}次会谈`;
-}
-
-function getModeWheelOptionStyle(index: number, scrollTop: number) {
-  const virtualIndex = scrollTop / MODE_PICKER_ITEM_HEIGHT;
-  const distance = index - virtualIndex;
-  const absoluteDistance = Math.abs(distance);
-  const limitedDistance = Math.min(absoluteDistance, MODE_PICKER_MAX_DISTANCE);
-  const easedFocus = 1 - limitedDistance / MODE_PICKER_MAX_DISTANCE;
-  const scale = 0.82 + easedFocus * 0.24;
-  const translateY = distance * (10 + limitedDistance * 3.5);
-  const rotateX = distance * -22;
-  const opacity = 0.18 + easedFocus * 0.82;
-  const blur = limitedDistance * 0.9;
-  const saturate = 0.5 + easedFocus * 0.7;
-  const brightness = 0.68 + easedFocus * 0.38;
-  const zIndex = Math.round((MODE_PICKER_MAX_DISTANCE - limitedDistance) * 10);
-
-  return {
-    filter: `blur(${blur}px) saturate(${saturate}) brightness(${brightness})`,
-    opacity: Math.max(opacity, 0.12),
-    transform: `perspective(960px) translateY(${translateY}px) rotateX(${rotateX}deg) scale(${scale})`,
-    zIndex
-  };
-}
-
-function getTypingStep(targetLength: number, currentLength: number) {
-  const remaining = targetLength - currentLength;
-  if (remaining > 48) {
-    return 4;
-  }
-  if (remaining > 20) {
-    return 3;
-  }
-  if (remaining > 8) {
-    return 2;
-  }
-  return 1;
 }
 
 function formatStreamingThinkingLine(thinking?: string) {
@@ -297,6 +253,14 @@ function ChevronDownIcon() {
   );
 }
 
+function CloseIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="M7 7l10 10M17 7 7 17" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
 function SunIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -352,20 +316,12 @@ function PaceDialIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24">
       <path
-        d="M5 14a7 7 0 1 1 14 0"
+        d="M13.4 2.8 6.9 12.2h4.3l-.6 9 6.5-9.4h-4.3Z"
         fill="none"
         stroke="currentColor"
-        strokeLinecap="round"
+        strokeLinejoin="round"
         strokeWidth="1.7"
       />
-      <path
-        d="M12 13.8 15.8 10"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.7"
-      />
-      <circle cx="12" cy="14" r="1.2" fill="currentColor" />
     </svg>
   );
 }
@@ -377,13 +333,10 @@ export function AppDashboard({ user }: { user: User }) {
   const lastStreamScrollTopRef = useRef(0);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
+  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
   const progressCardRef = useRef<HTMLDivElement | null>(null);
   const sessionRequestRef = useRef(0);
   const initialLoadRef = useRef(false);
-  const modePickerRef = useRef<HTMLDivElement | null>(null);
-  const modePickerTimeoutRef = useRef<number | null>(null);
-  const modePickerSnapFrameRef = useRef<number | null>(null);
-
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [activeSession, setActiveSession] = useState<SessionDetail | null>(null);
@@ -404,8 +357,6 @@ export function AppDashboard({ user }: { user: User }) {
   const [notice, setNotice] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [portalReady, setPortalReady] = useState(false);
-  const [modePickerScrollTop, setModePickerScrollTop] = useState(0);
-  const [modePickerScrolling, setModePickerScrolling] = useState(false);
   const [expandedThinkingIds, setExpandedThinkingIds] = useState<string[]>([]);
   const [paceBusy, setPaceBusy] = useState(false);
   const [pacePanelOpen, setPacePanelOpen] = useState(false);
@@ -413,7 +364,10 @@ export function AppDashboard({ user }: { user: User }) {
 
   const activeSessionMeta =
     sessions.find((session) => session.id === selectedSessionId) ?? activeSession;
+  const headerSession = activeSessionMeta ?? activeSession;
+  const headerSessionIsActive = headerSession?.status === "active";
   const completedSessions = sessions.filter((session) => session.status === "completed");
+  const supervisionSessionMap = new Map(sessions.map((session) => [session.id, session]));
   const completedCount = completedSessions.length;
   const lastMessage = activeSession?.messages.at(-1);
   const activeSessionId = activeSession?.id;
@@ -425,11 +379,22 @@ export function AppDashboard({ user }: { user: User }) {
       aria-label={`会谈进度 ${activeSessionProgress.percent}%`}
       className="session-progress-card"
     >
-      <div className="session-progress-meta">
-        <div>
-          <strong>{activeSessionProgress.phaseLabel}</strong>
-          <p>{activeSessionProgress.summary}</p>
-        </div>
+      <div
+        className={`session-progress-meta${
+          activeSessionProgress.phase === "completed" ? " is-completed" : ""
+        }`}
+      >
+        {activeSessionProgress.phase === "completed" ? (
+          <>
+            <strong>{activeSessionProgress.phaseLabel}</strong>
+            <p>{activeSessionProgress.summary}</p>
+          </>
+        ) : (
+          <div>
+            <strong>{activeSessionProgress.phaseLabel}</strong>
+            <p>{activeSessionProgress.summary}</p>
+          </div>
+        )}
       </div>
       <div
         aria-valuemax={100}
@@ -464,7 +429,8 @@ export function AppDashboard({ user }: { user: User }) {
 
   const syncComposerMetrics = useCallback(() => {
     const root = document.documentElement;
-    const composerHeight = composerRef.current?.offsetHeight ?? 0;
+    const composerHeight =
+      composerOverlayRef.current?.offsetHeight ?? composerRef.current?.offsetHeight ?? 0;
     root.style.setProperty("--composer-height", `${composerHeight}px`);
   }, []);
 
@@ -511,23 +477,6 @@ export function AppDashboard({ user }: { user: User }) {
   }, [createPanelOpen, sessions]);
 
   useEffect(() => {
-    if (!createPanelOpen || !modePickerRef.current) {
-      return;
-    }
-
-    const selectedIndex = SESSION_MODE_OPTIONS.indexOf(draftMode);
-    if (selectedIndex < 0) {
-      return;
-    }
-
-    modePickerRef.current.scrollTo({
-      top: selectedIndex * MODE_PICKER_ITEM_HEIGHT,
-      behavior: "smooth"
-    });
-    setModePickerScrollTop(selectedIndex * MODE_PICKER_ITEM_HEIGHT);
-  }, [createPanelOpen, draftMode]);
-
-  useEffect(() => {
     setPortalReady(true);
   }, []);
 
@@ -557,7 +506,7 @@ export function AppDashboard({ user }: { user: User }) {
   }, [activeSession?.status, busy, syncComposerMetrics]);
 
   useEffect(() => {
-    const composer = composerRef.current;
+    const composer = composerOverlayRef.current ?? composerRef.current;
     if (!composer || typeof ResizeObserver === "undefined") {
       return;
     }
@@ -654,17 +603,6 @@ export function AppDashboard({ user }: { user: User }) {
   }, [themePreference]);
 
   useEffect(() => {
-    return () => {
-      if (modePickerTimeoutRef.current) {
-        window.clearTimeout(modePickerTimeoutRef.current);
-      }
-      if (modePickerSnapFrameRef.current) {
-        window.cancelAnimationFrame(modePickerSnapFrameRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (!pacePanelOpen) {
       return;
     }
@@ -681,136 +619,6 @@ export function AppDashboard({ user }: { user: User }) {
     window.addEventListener("pointerdown", handleWindowPointerDown);
     return () => window.removeEventListener("pointerdown", handleWindowPointerDown);
   }, [pacePanelOpen]);
-
-  function stopModePickerSnapAnimation() {
-    if (modePickerSnapFrameRef.current) {
-      window.cancelAnimationFrame(modePickerSnapFrameRef.current);
-      modePickerSnapFrameRef.current = null;
-    }
-  }
-
-  function animateModePickerTo(top: number, duration = MODE_PICKER_SNAP_DURATION) {
-    const picker = modePickerRef.current;
-    if (!picker) {
-      return;
-    }
-
-    stopModePickerSnapAnimation();
-
-    const startTop = picker.scrollTop;
-    const distance = top - startTop;
-
-    if (Math.abs(distance) < 0.5) {
-      picker.scrollTop = top;
-      setModePickerScrollTop(top);
-      return;
-    }
-
-    const startTime = performance.now();
-
-    const step = (now: number) => {
-      const elapsed = now - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      const nextTop = startTop + distance * eased;
-
-      picker.scrollTop = nextTop;
-      setModePickerScrollTop(nextTop);
-
-      if (progress < 1) {
-        modePickerSnapFrameRef.current = window.requestAnimationFrame(step);
-        return;
-      }
-
-      picker.scrollTop = top;
-      setModePickerScrollTop(top);
-      modePickerSnapFrameRef.current = null;
-    };
-
-    modePickerSnapFrameRef.current = window.requestAnimationFrame(step);
-  }
-
-  function snapModePicker(index: number, animate = true) {
-    const nextTop = index * MODE_PICKER_ITEM_HEIGHT;
-
-    if (!animate) {
-      const picker = modePickerRef.current;
-      if (!picker) {
-        return;
-      }
-      stopModePickerSnapAnimation();
-      picker.scrollTop = nextTop;
-      setModePickerScrollTop(nextTop);
-      return;
-    }
-
-    animateModePickerTo(nextTop);
-  }
-
-  function settleModePicker() {
-    const picker = modePickerRef.current;
-    if (!picker) {
-      return;
-    }
-
-    const rawIndex = picker.scrollTop / MODE_PICKER_ITEM_HEIGHT;
-    const nextIndex = Math.max(0, Math.min(Math.round(rawIndex), SESSION_MODE_OPTIONS.length - 1));
-    const nextMode = SESSION_MODE_OPTIONS[nextIndex];
-    const alignedTop = nextIndex * MODE_PICKER_ITEM_HEIGHT;
-    const offset = Math.abs(picker.scrollTop - alignedTop);
-
-    if (nextMode && nextMode !== draftMode) {
-      setDraftMode(nextMode);
-    }
-
-    if (offset > 0.5) {
-      snapModePicker(nextIndex, true);
-      return;
-    }
-
-    setModePickerScrollTop(alignedTop);
-  }
-
-  function selectModeByIndex(index: number, animate = true) {
-    const nextMode = SESSION_MODE_OPTIONS[Math.max(0, Math.min(index, SESSION_MODE_OPTIONS.length - 1))];
-    if (!nextMode) {
-      return;
-    }
-
-    setDraftMode(nextMode);
-    snapModePicker(SESSION_MODE_OPTIONS.indexOf(nextMode), animate);
-  }
-
-  function handleModePickerScroll() {
-    const picker = modePickerRef.current;
-    if (!picker) {
-      return;
-    }
-
-    setModePickerScrollTop(picker.scrollTop);
-    setModePickerScrolling(true);
-
-    const nextIndex = Math.max(
-      0,
-      Math.min(
-        Math.round(picker.scrollTop / MODE_PICKER_ITEM_HEIGHT),
-        SESSION_MODE_OPTIONS.length - 1
-      )
-    );
-    const nextMode = SESSION_MODE_OPTIONS[nextIndex];
-    if (nextMode && nextMode !== draftMode) {
-      setDraftMode(nextMode);
-    }
-
-    if (modePickerTimeoutRef.current) {
-      window.clearTimeout(modePickerTimeoutRef.current);
-    }
-
-    modePickerTimeoutRef.current = window.setTimeout(() => {
-      setModePickerScrolling(false);
-      settleModePicker();
-    }, MODE_PICKER_SCROLL_END_DELAY);
-  }
 
   const loadSessionDetail = useCallback(async (sessionId: string) => {
     const requestId = sessionRequestRef.current + 1;
@@ -946,53 +754,6 @@ export function AppDashboard({ user }: { user: User }) {
     shouldStickToBottomRef.current = true;
     scrollChatToBottom("auto");
   }, [messageInput, scrollChatToBottom, view]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setActiveSession((current) => {
-        if (!current) {
-          return current;
-        }
-
-        let changed = false;
-        const messages = current.messages.map((message) => {
-          if (!message.isStreaming) {
-            return message;
-          }
-
-          const targetContent = message.streamTargetContent ?? message.content;
-          if (message.content.length < targetContent.length) {
-            const nextLength = Math.min(
-              targetContent.length,
-              message.content.length + getTypingStep(targetContent.length, message.content.length)
-            );
-            changed = true;
-            return {
-              ...message,
-              content: targetContent.slice(0, nextLength)
-            };
-          }
-
-          if (message.streamingDone) {
-            changed = true;
-            return {
-              ...message,
-              isStreaming: false,
-              streamingDone: false,
-              thinking: "",
-              streamTargetContent: undefined
-            };
-          }
-
-          return message;
-        });
-
-        return changed ? { ...current, messages } : current;
-      });
-    }, 18);
-
-    return () => window.clearInterval(timer);
-  }, []);
 
   const handleStreamScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     const stream = event.currentTarget;
@@ -1133,7 +894,6 @@ export function AppDashboard({ user }: { user: User }) {
       content: "",
       createdAt: new Date().toISOString(),
       thinking: "",
-      streamTargetContent: "",
       isStreaming: true,
       animateIn: true
     };
@@ -1235,7 +995,7 @@ export function AppDashboard({ user }: { user: User }) {
                     message.id === temporaryAssistantMessage.id
                       ? {
                           ...message,
-                          streamTargetContent: payload.content ?? message.streamTargetContent ?? "",
+                          content: payload.content ?? message.content,
                           thinking: message.thinking ?? ""
                         }
                       : message
@@ -1318,12 +1078,11 @@ export function AppDashboard({ user }: { user: User }) {
                   return {
                     ...assistantMessage,
                     animateIn: message.animateIn,
-                    content: message.content,
-                    thinking: message.thinking ?? assistantMessage.thinking,
+                    content: assistantMessage.content || message.content,
+                    thinking: assistantMessage.thinking ?? message.thinking,
                     rawThinking: assistantMessage.rawThinking,
-                    streamTargetContent: assistantMessage.content,
-                    isStreaming: true,
-                    streamingDone: true
+                    isStreaming: false,
+                    streamingDone: false
                   };
                 }
                 return message;
@@ -1437,6 +1196,54 @@ export function AppDashboard({ user }: { user: User }) {
     }
   }
 
+  async function rerunSupervision(session: SessionRecord) {
+    if (busy) {
+      return;
+    }
+
+    setBusy(true);
+    setNotice("");
+
+    try {
+      const response = await fetch(`/api/sessions/${session.id}/supervision`, {
+        method: "POST"
+      });
+      const raw = await response.text();
+      const payload = raw
+        ? (JSON.parse(raw) as {
+            error?: string;
+            supervisionCreated?: boolean;
+            alreadyCreated?: boolean;
+          })
+        : {};
+
+      if (!response.ok) {
+        if (payload.error === "SESSION_NOT_COMPLETED") {
+          setNotice("这段会谈尚未结束，暂时不能补做督导。");
+        } else if (payload.error === "NOT_FOUND") {
+          setNotice("这段会谈不存在，可能已经被删除。");
+        } else {
+          setNotice(payload.error ?? "手动督导失败");
+        }
+        return;
+      }
+
+      setNotice(
+        payload.alreadyCreated
+          ? "这段会谈已有督导记录。"
+          : payload.supervisionCreated
+            ? "已为这段归档补做督导。"
+            : "已发起手动督导。"
+      );
+      await loadSessions(session.id);
+      await loadJournals();
+    } catch {
+      setNotice("手动督导时出现异常，请稍后重试。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function moveCompleteModalToDeleteFlow() {
     if (!sessionToComplete || busy) {
       return;
@@ -1517,9 +1324,9 @@ export function AppDashboard({ user }: { user: User }) {
     count?: number;
     icon: ReactNode;
   }> = [
-    { key: "chat", label: "会谈", count: sessions.length, icon: <ChatIcon /> },
+    { key: "chat", label: "会谈", icon: <ChatIcon /> },
     { key: "history", label: "归档", count: completedCount, icon: <ArchiveIcon /> },
-    { key: "therapy", label: "笔记", icon: <NoteIcon /> },
+    { key: "therapy", label: "手帐", icon: <NoteIcon /> },
     { key: "supervision", label: "督导", count: supervisionRuns.length, icon: <SparkIcon /> }
   ];
 
@@ -1548,6 +1355,103 @@ export function AppDashboard({ user }: { user: User }) {
     }
     return "切换主题，当前跟随系统";
   }
+
+  const headerLeadingActions = (
+    <div className="header-leading-actions">
+      <IconButton className="ghost-button sidebar-toggle" label="打开侧边栏" onClick={() => setSidebarOpen(true)}>
+        <MenuIcon />
+      </IconButton>
+      {view === "chat" ? (
+        <div
+          className={`pace-control${pacePanelOpen ? " is-open" : ""}`}
+          data-pace-control-root="true"
+        >
+          <button
+            aria-expanded={pacePanelOpen}
+            aria-haspopup="dialog"
+            aria-label={`对话速度，当前${activeSessionPaceMeta.label}`}
+            className="signal-pill pace-icon-button"
+            disabled={!headerSessionIsActive || !activeSession || paceBusy || busy}
+            onClick={() => {
+              if (!headerSessionIsActive || !activeSession) {
+                return;
+              }
+              setPacePanelOpen((current) => !current);
+            }}
+            type="button"
+          >
+            <PaceDialIcon />
+          </button>
+          {pacePanelOpen && headerSessionIsActive && activeSession ? (
+            <div className="pace-popover" role="dialog" aria-label="对话速度设置">
+              <p className="pace-popover-title">对话速度</p>
+              <div className="pace-popover-options" role="tablist" aria-label="选择对话速度">
+                {SESSION_PACE_CATALOG.map((pace) => (
+                  <button
+                    aria-selected={activeSessionPace === pace.value}
+                    className={
+                      activeSessionPace === pace.value
+                        ? "pace-popover-option is-active"
+                        : "pace-popover-option"
+                    }
+                    disabled={paceBusy || busy}
+                    key={pace.value}
+                    onClick={() => {
+                      void updateSessionPaceValue(pace.value);
+                      setPacePanelOpen(false);
+                    }}
+                    role="tab"
+                    type="button"
+                  >
+                    <strong>{pace.label}</strong>
+                    <span>{pace.description}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <IconButton
+        className="ghost-button theme-toggle-button"
+        dataThemeMode={
+          themePreference === "system" ? "A" : themePreference === "light" ? "日" : "夜"
+        }
+        label={getThemeButtonLabel()}
+        onClick={() => setThemePreference(nextThemePreference[themePreference])}
+      >
+        {renderThemeIcon()}
+      </IconButton>
+    </div>
+  );
+
+  const headerGlobalActions = (
+    <div className="header-global-actions">
+      <button
+        className="ghost-button top-create-button main-create-button"
+        aria-label="新建会谈"
+        onClick={() => setCreatePanelOpen(true)}
+        type="button"
+      >
+        <PlusIcon />
+      </button>
+      {view === "chat" ? (
+        <button
+          className="ghost-button"
+          disabled={!headerSessionIsActive || !headerSession || busy}
+          onClick={() => {
+            if (!headerSession) {
+              return;
+            }
+            setSessionToComplete(headerSession);
+          }}
+          type="button"
+        >
+          结束
+        </button>
+      ) : null}
+    </div>
+  );
 
   return (
     <main className={view === "chat" ? "app-shell app-shell-chat-active" : "app-shell"}>
@@ -1588,46 +1492,6 @@ export function AppDashboard({ user }: { user: User }) {
                 ))}
               </nav>
 
-              <section className="rail-card rail-card-compact sidebar-sessions-card">
-                <div className="list-card-header sidebar-card-header">
-                  <h3>会谈</h3>
-                  <span>{sessions.length}</span>
-                </div>
-
-                {sessions.length === 0 ? (
-                  <div className="empty-state sidebar-empty-state">还没有会谈</div>
-                ) : (
-                  <div className="session-list sidebar-session-list">
-                    {sessions.map((session) => (
-                      <div
-                        key={session.id}
-                        className={session.id === selectedSessionId ? "session-item is-selected" : "session-item"}
-                      >
-                        <button className="session-main-button" onClick={() => void openSession(session.id)} type="button">
-                          <div className="session-copy">
-                            <strong>{session.title}</strong>
-                            <div className="session-meta">
-                              <span>{normalizeSessionMode(session.mode)}</span>
-                              <span>{formatDateOnly(session.updatedAt)}</span>
-                            </div>
-                          </div>
-                          <span className={`risk-dot risk-${session.riskLevel}`} aria-hidden="true" />
-                        </button>
-                        <IconButton
-                          className="ghost-button danger-button session-delete-button"
-                          label={`删除 ${session.title}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setSessionToDelete(session);
-                          }}
-                        >
-                          <TrashIcon />
-                        </IconButton>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
             </div>
 
             <div className="sidebar-footer">
@@ -1639,152 +1503,28 @@ export function AppDashboard({ user }: { user: User }) {
         </aside>
 
         <section className={sidebarOpen ? "experience-shell experience-shell-full sidebar-stage is-sidebar-open" : "experience-shell experience-shell-full sidebar-stage"}>
-          <header
-            className={
-              view === "chat" && mobileSessionBarCollapsed
-                ? "immersion-header is-collapsed-mobile"
-                : "immersion-header"
-            }
-          >
-            <div className="header-utility-row header-utility-row-main">
-              <IconButton className="ghost-button sidebar-toggle" label="打开侧边栏" onClick={() => setSidebarOpen(true)}>
-                <MenuIcon />
-              </IconButton>
-              <div className="header-session-meta">
-                {activeSession ? (
-                  <>
-                    <h1>{activeSession.title}</h1>
-                  </>
-                ) : (
-                  <h1>会谈</h1>
-                )}
+          {view === "chat" ? null : (
+            <header className="immersion-header">
+              <div className="header-utility-row header-utility-row-main">
+                {headerLeadingActions}
+                {headerGlobalActions}
               </div>
-              {view === "chat" && activeSession ? (
-                <div
-                  className={
-                    mobileSessionBarCollapsed
-                      ? "session-floating-bar is-collapsed-mobile"
-                      : "session-floating-bar"
-                  }
-                >
-                  <button
-                    aria-expanded={!mobileSessionBarCollapsed}
-                    aria-label="展开会谈操作栏"
-                    className="session-mobile-peek"
-                    onClick={() => setMobileSessionBarCollapsed(false)}
-                    type="button"
-                  >
-                    <span aria-hidden="true" className="session-mobile-peek-handle" />
-                    <span className="session-mobile-peek-copy">
-                      <strong>{activeSession.title}</strong>
-                      <span>{normalizeSessionMode(activeSession.mode)}</span>
-                    </span>
-                  </button>
-                  <div className="chat-stage-session-meta">
-                    <div className="header-session-signals chat-stage-session-signals">
-                      <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
-                      <div className="session-inline-signals">
-                        {activeSession.status === "active" ? (
-                          <div
-                            className={`pace-control${pacePanelOpen ? " is-open" : ""}`}
-                            data-pace-control-root="true"
-                          >
-                            <button
-                              aria-expanded={pacePanelOpen}
-                              aria-haspopup="dialog"
-                              aria-label={`对话速度，当前${activeSessionPaceMeta.label}`}
-                              className="signal-pill pace-icon-button"
-                              disabled={paceBusy || busy}
-                              onClick={() => setPacePanelOpen((current) => !current)}
-                              type="button"
-                            >
-                              <PaceDialIcon />
-                              <span>{activeSessionPaceMeta.label}</span>
-                            </button>
-                            {pacePanelOpen ? (
-                              <div className="pace-popover" role="dialog" aria-label="对话速度设置">
-                                <p className="pace-popover-title">对话速度</p>
-                                <div className="pace-popover-options" role="tablist" aria-label="选择对话速度">
-                                  {SESSION_PACE_CATALOG.map((pace) => (
-                                    <button
-                                      aria-selected={activeSessionPace === pace.value}
-                                      className={
-                                        activeSessionPace === pace.value
-                                          ? "pace-popover-option is-active"
-                                          : "pace-popover-option"
-                                      }
-                                      disabled={paceBusy || busy}
-                                      key={pace.value}
-                                      onClick={() => {
-                                        void updateSessionPaceValue(pace.value);
-                                        setPacePanelOpen(false);
-                                      }}
-                                      role="tab"
-                                      type="button"
-                                    >
-                                      <strong>{pace.label}</strong>
-                                      <span>{pace.description}</span>
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            ) : null}
-                          </div>
-                        ) : null}
-                        <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="stage-actions session-stage-actions">
-                    {activeSession.status === "active" ? (
-                      <button
-                        className="primary-button"
-                        disabled={busy}
-                        onClick={() => setSessionToComplete(activeSessionMeta ?? activeSession)}
-                        type="button"
-                      >
-                        结束
-                      </button>
-                    ) : (
-                      <span className="pill">已归档</span>
-                    )}
-                    <IconButton
-                      className="ghost-button danger-button"
-                      label="删除会谈"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setSessionToDelete(activeSessionMeta ?? activeSession);
-                      }}
-                    >
-                      <TrashIcon />
-                    </IconButton>
-                  </div>
-                </div>
-              ) : null}
-              <div className="header-global-actions">
-                <IconButton
-                  className="ghost-button theme-toggle-button"
-                  dataThemeMode={
-                    themePreference === "system" ? "A" : themePreference === "light" ? "日" : "夜"
-                  }
-                  label={getThemeButtonLabel()}
-                  onClick={() => setThemePreference(nextThemePreference[themePreference])}
-                >
-                  {renderThemeIcon()}
-                </IconButton>
-                <button
-                  className="primary-button top-create-button main-create-button"
-                  aria-label="新建会谈"
-                  onClick={() => setCreatePanelOpen(true)}
-                  type="button"
-                >
-                  <PlusIcon />
-                </button>
-              </div>
-            </div>
-          </header>
+            </header>
+          )}
 
-          {notice ? <div className="notice">{notice}</div> : null}
+          {notice ? (
+            <div aria-live="polite" className="notice" role="status">
+              <span className="notice-copy">{notice}</span>
+              <button
+                aria-label="关闭提示"
+                className="notice-dismiss"
+                onClick={() => setNotice("")}
+                type="button"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+          ) : null}
 
           <div className={`view-stage view-stage-${view}`} key={view}>
             <div className="view-stage-ornaments" aria-hidden="true">
@@ -1794,6 +1534,12 @@ export function AppDashboard({ user }: { user: User }) {
               <span className="view-streak view-streak-a" />
               <span className="view-streak view-streak-b" />
             </div>
+            {view === "chat" ? (
+              <div className="chat-stage-toolbar" aria-label="聊天快捷操作">
+                {headerLeadingActions}
+                {headerGlobalActions}
+              </div>
+            ) : null}
             {view === "chat" ? (
               <section className="immersion-layout immersion-layout-full">
                 <section className="chat-stage">
@@ -1902,34 +1648,34 @@ export function AppDashboard({ user }: { user: User }) {
                           );
                         })}
                       </div>
-                    </div>
-
-                    {activeSession.status === "active" ? (
-                      <form className="composer composer-stage" onSubmit={sendMessage} ref={composerRef}>
-                        <p className="composer-guardrail-hint">
-                          仅支持与心理支持相关、真实且合规的表达；提示词攻击、灌水、违法违规或挪作他用将触发警告与限制。
-                        </p>
-                        <div className="composer-input-shell">
-                          <textarea
-                            ref={composerTextareaRef}
-                            placeholder="说说你此刻最想被理解的一件事..."
-                            rows={1}
-                            value={messageInput}
-                            onChange={(event) => setMessageInput(event.target.value)}
-                            onCompositionStart={() => setIsComposerComposing(true)}
-                            onCompositionEnd={() => setIsComposerComposing(false)}
-                            onFocus={handleComposerFocus}
-                            onClick={handleComposerFocus}
-                            onKeyDown={handleComposerKeyDown}
-                          />
-                          <button className="primary-button composer-submit" disabled={busy} type="submit">
-                            {busy ? "正在回复..." : "发送"}
-                          </button>
+                      {activeSession.status === "active" ? (
+                        <div className="chat-stage-composer-overlay" ref={composerOverlayRef}>
+                          <form className="composer composer-stage" onSubmit={sendMessage} ref={composerRef}>
+                            <div className="composer-input-shell">
+                              <textarea
+                                ref={composerTextareaRef}
+                                placeholder="说说你此刻最想被理解的一件事..."
+                                rows={1}
+                                value={messageInput}
+                                onChange={(event) => setMessageInput(event.target.value)}
+                                onCompositionStart={() => setIsComposerComposing(true)}
+                                onCompositionEnd={() => setIsComposerComposing(false)}
+                                onFocus={handleComposerFocus}
+                                onClick={handleComposerFocus}
+                                onKeyDown={handleComposerKeyDown}
+                              />
+                              <button className="primary-button composer-submit" disabled={busy} type="submit">
+                                {busy ? "正在回复..." : "发送"}
+                              </button>
+                            </div>
+                          </form>
                         </div>
-                      </form>
-                    ) : (
-                      <div className="composer composer-locked">这段会谈已结束</div>
-                    )}
+                      ) : (
+                        <div className="chat-stage-composer-overlay" ref={composerOverlayRef}>
+                          <div className="composer composer-locked">这段会谈已结束</div>
+                        </div>
+                      )}
+                    </div>
                   </>
                 ) : (
                   <div className="empty-state empty-chat empty-chat-empty-session">点击右上角新建会谈</div>
@@ -1953,24 +1699,45 @@ export function AppDashboard({ user }: { user: User }) {
                   <div className="empty-state">还没有归档内容。开始一次会谈后，这里会自动出现。</div>
                 ) : (
                   completedSessions.map((session) => (
-                    <div className="table-row table-row-button" key={session.id}>
-                      <button className="table-row-main" onClick={() => void openSession(session.id)} type="button">
-                        <div>
-                          <strong>{session.title}</strong>
-                          <p>{session.redactedSummary}</p>
-                        </div>
-                        <span>{normalizeSessionMode(session.mode)}</span>
-                        <span>{session.status}</span>
-                        <span>{session.messageCount} 条</span>
-                        <span>{formatDateOnly(session.updatedAt)}</span>
-                      </button>
+                    <div className="table-row table-row-button history-row" key={session.id}>
                       <button
-                        className="ghost-button danger-button"
-                        onClick={() => setSessionToDelete(session)}
+                        className="table-row-main history-row-main"
+                        onClick={() => void openSession(session.id)}
                         type="button"
                       >
-                        删除
+                        <div className="history-row-summary">
+                          <strong>{session.title}</strong>
+                          <p>{session.redactedSummary}</p>
+                          {session.supervisionFailureReason ? (
+                            <p className="history-row-warning">
+                              自动督导失败：{session.supervisionFailureReason}
+                            </p>
+                          ) : null}
+                        </div>
+                        <span className="history-row-cell history-row-mode">{normalizeSessionMode(session.mode)}</span>
+                        <span className="history-row-cell history-row-status">{session.status}</span>
+                        <span className="history-row-cell history-row-count">{session.messageCount} 条</span>
+                        <span className="history-row-cell history-row-date">{formatDateOnly(session.updatedAt)}</span>
                       </button>
+                      <div className="history-row-actions">
+                        {!session.supervisionId ? (
+                          <button
+                            className="ghost-button history-row-supervision"
+                            disabled={busy}
+                            onClick={() => void rerunSupervision(session)}
+                            type="button"
+                          >
+                            督导
+                          </button>
+                        ) : null}
+                        <button
+                          className="ghost-button danger-button history-row-delete"
+                          onClick={() => setSessionToDelete(session)}
+                          type="button"
+                        >
+                          删除
+                        </button>
+                      </div>
                     </div>
                   ))
                 )}
@@ -1979,32 +1746,32 @@ export function AppDashboard({ user }: { user: User }) {
             ) : null}
 
             {view === "therapy" ? (
-              <section className="journal-card">
-              <div className="journal-header">
-                <div>
-                  <h3>咨询师手帐</h3>
-                  <p>把散落的感受与线索，整理成能回看的自己。</p>
+              <section className="journal-board">
+                <div className="journal-card">
+                  <div className="journal-header">
+                    <div>
+                      <h3>咨询手帐</h3>
+                      <p>把散落的感受与线索，整理成能回看的自己。</p>
+                    </div>
+                  </div>
+                  <pre>{therapyJournal}</pre>
                 </div>
-                <span className="privacy-badge">只读</span>
-              </div>
-              <pre>{therapyJournal}</pre>
+
+                <div className="journal-card">
+                  <div className="journal-header">
+                    <div>
+                      <h3>督导手帐</h3>
+                      <p>在更高一层的视角里，看见对话背后的方向。</p>
+                    </div>
+                  </div>
+                  <pre>{supervisionJournal}</pre>
+                </div>
               </section>
             ) : null}
 
             {view === "supervision" ? (
-              <section className="supervision-layout">
-              <div className="journal-card">
-                <div className="journal-header">
-                  <div>
-                    <h3>督导手帐</h3>
-                    <p>在更高一层的视角里，看见对话背后的方向。</p>
-                  </div>
-                  <span className="privacy-badge">自动生成</span>
-                </div>
-                <pre>{supervisionJournal}</pre>
-              </div>
-
-              <div className="runs-card">
+              <section className="supervision-records">
+              <div className="history-card supervision-card">
                 <div className="journal-header">
                   <div>
                     <h3>督导记录</h3>
@@ -2013,29 +1780,47 @@ export function AppDashboard({ user }: { user: User }) {
                   <span className="privacy-badge">{supervisionRuns.length} 条</span>
                 </div>
 
+                <div className="table-list">
                 {supervisionRuns.length === 0 ? (
                   <div className="empty-state">
                     还没有督导记录。完成一次会谈后，这里会出现。
                   </div>
                 ) : (
                   supervisionRuns.map((run) => (
-                    <article className="run-card" key={run.id}>
-                      <header>
-                        <div>
-                          <strong>{run.redactedSummary}</strong>
-                          <p>{formatDateTime(run.createdAt)}</p>
+                    <div className="table-row table-row-button history-row" key={run.id}>
+                      <button
+                        className="table-row-main history-row-main"
+                        onClick={() => void openSession(run.sessionId)}
+                        type="button"
+                      >
+                        <div className="history-row-summary">
+                          <strong>
+                            {supervisionSessionMap.get(run.sessionId)?.title ?? "督导记录"}
+                          </strong>
+                          <p>{run.redactedSummary}</p>
                         </div>
-                        <span>{formatDateOnly(run.completedAt)}</span>
-                      </header>
-                      {run.transcript.map((item) => (
-                        <div className="run-line" key={item.id}>
-                          <span>{item.role === "supervisor" ? "督导师" : item.role === "assistant" ? "咨询师" : "来访者"}</span>
-                          <p>{item.content}</p>
-                        </div>
-                      ))}
-                    </article>
+                        <span className="history-row-cell history-row-mode">
+                          {supervisionSessionMap.get(run.sessionId)?.mode ?? "-"}
+                        </span>
+                        <span className="history-row-cell history-row-status">completed</span>
+                        <span className="history-row-cell history-row-count">{run.transcript.length} 轮</span>
+                        <span className="history-row-cell history-row-date">
+                          {formatDateOnly(run.completedAt)}
+                        </span>
+                      </button>
+                      <div className="history-row-actions">
+                        <button
+                          className="ghost-button history-row-supervision"
+                          onClick={() => void openSession(run.sessionId)}
+                          type="button"
+                        >
+                          查看
+                        </button>
+                      </div>
+                    </div>
                   ))
                 )}
+                </div>
               </div>
               </section>
             ) : null}
@@ -2134,43 +1919,22 @@ export function AppDashboard({ user }: { user: User }) {
 
                   <label className="create-session-field">
                     <span>流派</span>
-                    <div className="mode-wheel-field">
-                      <div className="mode-wheel-shell">
-                        <div
-                          aria-activedescendant={`session-mode-${SESSION_MODE_OPTIONS.indexOf(draftMode)}`}
-                          aria-label="选择会谈流派"
-                          className={modePickerScrolling ? "mode-wheel-picker is-scrolling" : "mode-wheel-picker"}
-                          onScroll={handleModePickerScroll}
-                          ref={modePickerRef}
-                          role="listbox"
-                          tabIndex={0}
-                        >
-                          <div
-                            aria-hidden="true"
-                            className="mode-wheel-spacer"
-                            style={{ height: `${MODE_PICKER_SPACER_HEIGHT}px` }}
-                          />
-                          {SESSION_MODE_CATALOG.map((mode, index) => (
+                    <div className="mode-selector-field">
+                      <div className="mode-selector-shell" role="listbox" aria-label="选择会谈流派">
+                        <div className="mode-selector-grid">
+                          {SESSION_MODE_CATALOG.map((mode) => (
                             <button
                               aria-pressed={draftMode === mode.value}
-                              className={draftMode === mode.value ? "mode-wheel-option is-selected" : "mode-wheel-option"}
-                              id={`session-mode-${index}`}
+                              className={draftMode === mode.value ? "mode-selector-option is-selected" : "mode-selector-option"}
                               key={mode.value}
-                              onClick={() => selectModeByIndex(index)}
-                              style={getModeWheelOptionStyle(index, modePickerScrollTop)}
+                              onClick={() => setDraftMode(mode.value)}
                               type="button"
                             >
-                              <strong className="mode-wheel-option-label">{mode.shortLabel}</strong>
-                              <span className="mode-wheel-option-acronym">{mode.acronym}</span>
+                              <strong className="mode-selector-option-label">{mode.shortLabel}</strong>
+                              <span className="mode-selector-option-acronym">{mode.acronym}</span>
                             </button>
                           ))}
-                          <div
-                            aria-hidden="true"
-                            className="mode-wheel-spacer"
-                            style={{ height: `${MODE_PICKER_SPACER_HEIGHT}px` }}
-                          />
                         </div>
-                        <div aria-hidden="true" className="mode-wheel-highlight" />
                       </div>
                     </div>
                   </label>

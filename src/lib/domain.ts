@@ -27,6 +27,14 @@ function parseTranscript(session: TherapySessionRecord) {
   return JSON.parse(decryptForUser(session.userId, session.transcript)) as ChatMessage[];
 }
 
+function formatSupervisionFailureReason(error: unknown) {
+  if (error instanceof Error) {
+    return error.message.slice(0, 300);
+  }
+
+  return "自动督导生成失败，请稍后重试。";
+}
+
 function isVisibleMessage(message: ChatMessage) {
   return message.role !== "system";
 }
@@ -598,6 +606,7 @@ export async function completeSession(user: UserRecord, sessionId: string) {
     let supervisionRun: SupervisionRunRecord | undefined;
     let supervisionJournal: SupervisionJournalRecord | undefined;
     let supervisionFailed = false;
+    let supervisionFailureReason: string | undefined;
     let alreadyCompleted = false;
 
     if (session.autoSupervision) {
@@ -645,8 +654,9 @@ export async function completeSession(user: UserRecord, sessionId: string) {
           supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
           supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
         }
-      } catch {
+      } catch (error) {
         supervisionFailed = true;
+        supervisionFailureReason = formatSupervisionFailureReason(error);
       }
     }
 
@@ -681,6 +691,11 @@ export async function completeSession(user: UserRecord, sessionId: string) {
       finalized = true;
       if (supervisionRun) {
         mutableSession.supervisionId = supervisionRun.id;
+        delete mutableSession.supervisionFailureReason;
+        delete mutableSession.supervisionFailedAt;
+      } else if (supervisionFailed) {
+        mutableSession.supervisionFailureReason = supervisionFailureReason;
+        mutableSession.supervisionFailedAt = new Date().toISOString();
       }
 
       if (hasExistingTherapyJournal) {
@@ -724,7 +739,7 @@ export async function completeSession(user: UserRecord, sessionId: string) {
     }
 
     await logEvent(user, "session_completed", { autoSupervision: session.autoSupervision }, session.id);
-    if (session.autoSupervision) {
+    if (supervisionRun) {
       await logEvent(user, "supervision_completed", { sessionTitle: session.title }, session.id);
     }
 
@@ -737,6 +752,110 @@ export async function completeSession(user: UserRecord, sessionId: string) {
   } catch (error) {
     await releaseCompletionLock(user.id, session.id, completionLock.lockId);
     throw error;
+  };
+}
+
+export async function rerunSupervisionForSession(user: UserRecord, sessionId: string) {
+  const db = await readDb();
+  const session = db.therapySessions.find(
+    (item) => item.id === sessionId && item.userId === user.id
+  );
+
+  if (!session) {
+    throw new Error("NOT_FOUND");
+  }
+
+  if (session.status !== "completed") {
+    throw new Error("SESSION_NOT_COMPLETED");
+  }
+
+  if (session.supervisionId) {
+    return {
+      sessionId: session.id,
+      supervisionCreated: true,
+      alreadyCreated: true
+    };
+  }
+
+  const messages = parseTranscript(session);
+  const supervisionJournalExisting = db.supervisionJournals.find(
+    (item) => item.userId === user.id
+  );
+  const supervisionOutput = await generateSupervisionArtifacts({
+    sessionTitle: session.title,
+    messages,
+    supervisionJournal: supervisionJournalExisting
+      ? decryptForUser(user.id, supervisionJournalExisting.content)
+      : null
+  });
+  const now = new Date().toISOString();
+  const supervisionRun: SupervisionRunRecord = {
+    id: createId("supervision"),
+    userId: user.id,
+    sessionId: session.id,
+    status: "completed",
+    createdAt: now,
+    completedAt: now,
+    transcript: encryptForUser(user.id, JSON.stringify(supervisionOutput.transcript)),
+    journalEntry: encryptForUser(user.id, supervisionOutput.journalEntry),
+    redactedSummary: supervisionOutput.redactedSummary,
+    journalEntryPreview: supervisionOutput.journalEntryPreview
+  };
+
+  const mergedSupervision = mergeJournalContent(
+    supervisionJournalExisting
+      ? decryptForUser(user.id, supervisionJournalExisting.content)
+      : null,
+    supervisionOutput.journalEntry
+  );
+
+  const supervisionJournal: SupervisionJournalRecord = supervisionJournalExisting ?? {
+    id: createId("supervision_journal"),
+    userId: user.id,
+    updatedAt: now,
+    content: encryptForUser(user.id, mergedSupervision),
+    redactedSummary: supervisionOutput.redactedSummary
+  };
+
+  if (supervisionJournalExisting) {
+    supervisionJournal.updatedAt = now;
+    supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
+    supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
+  }
+
+  await writeDb((draft) => {
+    const mutableSession = draft.therapySessions.find(
+      (item) => item.id === session.id && item.userId === user.id
+    );
+    if (!mutableSession) {
+      return;
+    }
+
+    if (mutableSession.supervisionId) {
+      return;
+    }
+
+    mutableSession.supervisionId = supervisionRun.id;
+    delete mutableSession.supervisionFailureReason;
+    delete mutableSession.supervisionFailedAt;
+    draft.supervisionRuns.push(supervisionRun);
+
+    const existing = draft.supervisionJournals.find((item) => item.userId === user.id);
+    if (existing) {
+      existing.updatedAt = supervisionJournal.updatedAt;
+      existing.content = supervisionJournal.content;
+      existing.redactedSummary = supervisionJournal.redactedSummary;
+    } else {
+      draft.supervisionJournals.push(supervisionJournal);
+    }
+  });
+
+  await logEvent(user, "supervision_completed", { sessionTitle: session.title }, session.id);
+
+  return {
+    sessionId: session.id,
+    supervisionCreated: true,
+    alreadyCreated: false
   };
 }
 
