@@ -290,6 +290,23 @@ function buildMergedSupervisionArtifacts(
   };
 }
 
+function resolveSupervisionRunSessionId(
+  sessions: TherapySessionRecord[],
+  run: SupervisionRunRecord
+) {
+  const directMatch = sessions.find((session) => session.id === run.sessionId);
+  if (directMatch) {
+    return directMatch.id;
+  }
+
+  const supervisionMatch = sessions.find((session) => session.supervisionId === run.id);
+  if (supervisionMatch) {
+    return supervisionMatch.id;
+  }
+
+  return null;
+}
+
 export async function appendMessage(
   user: UserRecord,
   sessionId: string,
@@ -973,14 +990,22 @@ export async function getTherapyJournal(userId: string) {
 export async function getSupervisionJournal(userId: string) {
   const db = await readDb();
   const journal = db.supervisionJournals.find((item) => item.userId === userId);
+  const completedSessions = db.therapySessions.filter(
+    (session) => session.userId === userId && session.status === "completed"
+  );
   const runs = db.supervisionRuns
     .filter((item) => item.userId === userId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .map((item) => {
+      const resolvedSessionId = resolveSupervisionRunSessionId(completedSessions, item);
+      if (!resolvedSessionId) {
+        return null;
+      }
+
       try {
         return {
           id: item.id,
-          sessionId: item.sessionId,
+          sessionId: resolvedSessionId,
           createdAt: item.createdAt,
           completedAt: item.completedAt,
           redactedSummary: item.redactedSummary,

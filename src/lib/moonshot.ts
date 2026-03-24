@@ -18,15 +18,26 @@ export class MoonshotRequestError extends Error {
 }
 
 const DEFAULT_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1";
-const DEFAULT_MOONSHOT_MODEL = "kimi-k2.5";
+const DEFAULT_MOONSHOT_MODEL = "moonshot-v1-8k";
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 type MoonshotChatResponse = {
   choices?: Array<{
     message?: {
-      content?: string | Array<{ type?: string; text?: string }>;
+      content?:
+        | string
+        | Array<{
+            type?: string;
+            text?: string;
+            content?: string;
+          }>;
+      reasoning_content?: string;
+      text?: string;
     };
+    text?: string;
+    finish_reason?: string;
   }>;
+  output_text?: string;
   error?: {
     message?: string;
   };
@@ -40,6 +51,14 @@ type GuardrailAssessment = {
   reason: string;
   confidence: number;
 };
+
+function isFixedTemperatureModelError(message: string) {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("invalid temperature") &&
+    (lower.includes("only 1 is allowed") || lower.includes("may only be set to 1"))
+  );
+}
 
 function positiveIntFromEnv(value: string | undefined, fallback: number) {
   const parsed = Number(value);
@@ -70,18 +89,37 @@ function resolveLanguage(input?: string | null): HumanizerLanguage {
   return normalized.startsWith("zh") ? "zh" : "en";
 }
 
+function usesFixedTemperatureModel(model: string) {
+  return /^kimi-k2(\b|[.-])/i.test(model.trim());
+}
+
 function extractContent(payload: MoonshotChatResponse) {
-  const content = payload.choices?.[0]?.message?.content;
+  const firstChoice = payload.choices?.[0];
+  const message = firstChoice?.message;
+  const content = message?.content;
   if (typeof content === "string") {
     return content.trim();
   }
 
   if (Array.isArray(content)) {
     return content
-      .map((item) => item.text?.trim() || "")
+      .map((item) => item.text?.trim() || item.content?.trim() || "")
       .filter(Boolean)
       .join("\n")
       .trim();
+  }
+
+  const fallbackCandidates = [
+    message?.text,
+    message?.reasoning_content,
+    firstChoice?.text,
+    payload.output_text
+  ];
+
+  for (const candidate of fallbackCandidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
   }
 
   return "";
@@ -96,27 +134,50 @@ async function requestMoonshotText(input: {
   const config = getMoonshotConfig();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+  const requestedMaxTokens = input.maxTokens ?? 256;
+  const basePayload = {
+    model: config.model,
+    messages: [
+      { role: "system", content: input.system },
+      { role: "user", content: input.user }
+    ]
+  };
 
   try {
-    const response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        Authorization: `Bearer ${config.apiKey}`
-      },
-      body: JSON.stringify({
-        model: config.model,
-        temperature: input.temperature ?? 0.3,
-        max_tokens: input.maxTokens ?? 256,
-        messages: [
-          { role: "system", content: input.system },
-          { role: "user", content: input.user }
-        ]
-      }),
-      signal: controller.signal
-    });
+    async function sendRequest(temperature: number, maxTokens: number) {
+      const response = await fetch(`${config.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Authorization: `Bearer ${config.apiKey}`
+        },
+        body: JSON.stringify({
+          ...basePayload,
+          max_tokens: maxTokens,
+          temperature
+        }),
+        signal: controller.signal
+      });
 
-    const payload = (await response.json().catch(() => ({}))) as MoonshotChatResponse;
+      const payload = (await response.json().catch(() => ({}))) as MoonshotChatResponse;
+      return { response, payload };
+    }
+
+    const preferredTemperature = usesFixedTemperatureModel(config.model)
+      ? 1
+      : input.temperature ?? 0.3;
+    let effectiveMaxTokens = requestedMaxTokens;
+    let { response, payload } = await sendRequest(preferredTemperature, effectiveMaxTokens);
+
+    if (!response.ok) {
+      const errorMessage =
+        payload.error?.message?.trim() || `Moonshot 请求失败 (${response.status})`;
+
+      if (preferredTemperature !== 1 && isFixedTemperatureModelError(errorMessage)) {
+        ({ response, payload } = await sendRequest(1, effectiveMaxTokens));
+      }
+    }
+
     if (!response.ok) {
       throw new MoonshotRequestError(
         payload.error?.message?.trim() || `Moonshot 请求失败 (${response.status})`,
@@ -126,6 +187,27 @@ async function requestMoonshotText(input: {
 
     const text = extractContent(payload);
     if (!text) {
+      const onlyReasoning =
+        Boolean(payload.choices?.[0]?.message?.reasoning_content?.trim()) &&
+        payload.choices?.[0]?.finish_reason === "length";
+
+      if (onlyReasoning && effectiveMaxTokens < 512) {
+        effectiveMaxTokens = 512;
+        ({ response, payload } = await sendRequest(preferredTemperature, effectiveMaxTokens));
+
+        if (!response.ok) {
+          throw new MoonshotRequestError(
+            payload.error?.message?.trim() || `Moonshot 请求失败 (${response.status})`,
+            response.status
+          );
+        }
+
+        const retriedText = extractContent(payload);
+        if (retriedText) {
+          return retriedText;
+        }
+      }
+
       throw new MoonshotRequestError("Moonshot 返回了空内容", 502);
     }
 
@@ -375,7 +457,7 @@ export async function assessGuardrailForInput(input: {
   content: string;
   messages: ChatMessage[];
   sessionTitle?: string;
-}) {
+}): Promise<GuardrailAssessment> {
   const transcript = input.messages
     .filter((message) => message.role === "user" || message.role === "assistant")
     .slice(-8)
@@ -383,20 +465,29 @@ export async function assessGuardrailForInput(input: {
     .filter(Boolean)
     .join("\n");
 
-  const reply = await requestMoonshotText({
-    system: buildGuardrailSystemPrompt(),
-    user: [
-      `会谈标题：${input.sessionTitle?.trim() || "未命名会谈"}`,
-      "",
-      "# 最近对话上下文",
-      transcript || "暂无上下文。",
-      "",
-      "# 当前待判定输入",
-      input.content.trim()
-    ].join("\n"),
-    temperature: 0.1,
-    maxTokens: 220
-  });
+  try {
+    const reply = await requestMoonshotText({
+      system: buildGuardrailSystemPrompt(),
+      user: [
+        `会谈标题：${input.sessionTitle?.trim() || "未命名会谈"}`,
+        "",
+        "# 最近对话上下文",
+        transcript || "暂无上下文。",
+        "",
+        "# 当前待判定输入",
+        input.content.trim()
+      ].join("\n"),
+      temperature: 0.1,
+      maxTokens: 220
+    });
 
-  return parseGuardrailAssessment(reply);
+    return parseGuardrailAssessment(reply);
+  } catch {
+    return {
+      decision: "allow",
+      category: "none",
+      reason: "守卫模型暂时不可用，已按允许继续处理。",
+      confidence: 0
+    };
+  }
 }

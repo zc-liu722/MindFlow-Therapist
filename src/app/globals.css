@@ -3204,6 +3204,15 @@ a {
   overflow: hidden;
 }
 
+.app-shell.app-shell-chat-active .app-grid,
+.app-shell.app-shell-chat-active .experience-shell-full,
+.app-shell.app-shell-chat-active .view-stage-chat,
+.app-shell.app-shell-chat-active .immersion-layout-full,
+.app-shell.app-shell-chat-active .chat-stage,
+.app-shell.app-shell-chat-active .chat-stage-scroll-shell {
+  height: 100%;
+}
+
 .app-shell.app-shell-chat-active .view-stage-chat,
 .app-shell.app-shell-chat-active .immersion-layout-full,
 .app-shell.app-shell-chat-active .chat-stage {
@@ -3479,6 +3488,7 @@ a {
   padding-top: calc(var(--chat-toolbar-offset, 0px) + var(--chat-progress-gap, 0px) + var(--session-progress-height, 0px) + 0.55rem);
   padding-right: 0.2rem;
   padding-bottom: calc(var(--composer-height) + var(--keyboard-inset) + var(--chat-composer-gap, 0px) + 1.5rem);
+  scroll-padding-top: calc(var(--chat-toolbar-offset, 0px) + var(--chat-progress-gap, 0px) + var(--session-progress-height, 0px) + 0.55rem);
   scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
 }
@@ -3527,6 +3537,19 @@ a {
   width: 100%;
   max-width: 960px;
   margin: 0 auto;
+}
+
+.message-stream > .message-row:first-child {
+  margin-top: 0.02rem;
+}
+
+.app-shell.app-shell-chat-active .message-stream {
+  padding-top: calc(var(--chat-progress-gap, 0px) + var(--session-progress-height, 0px) + 0.44rem);
+  scroll-padding-top: calc(var(--chat-progress-gap, 0px) + var(--session-progress-height, 0px) + 0.44rem);
+}
+
+.app-shell.app-shell-chat-active .message-stream > .message-row:first-child {
+  margin-top: 0;
 }
 
 .message-row-user {
@@ -4744,6 +4767,140 @@ a {
   display: block;
 }
 
+.supervision-detail-card {
+  display: grid;
+  gap: 1rem;
+}
+
+.supervision-detail-header {
+  align-items: flex-start;
+}
+
+.supervision-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.supervision-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.supervision-detail-meta-item {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.2rem;
+  padding: 0.35rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 70%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-glass-strong) 82%, transparent);
+  color: var(--muted);
+}
+
+.supervision-detail-lead {
+  padding: 1rem 1.05rem;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 68%, transparent);
+  border-radius: 1.2rem;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-glass-strong) 88%, transparent), color-mix(in srgb, var(--surface-glass) 76%, transparent)),
+    color-mix(in srgb, var(--bg-panel) 82%, transparent);
+}
+
+.supervision-detail-lead strong {
+  display: block;
+  margin-bottom: 0.45rem;
+  color: color-mix(in srgb, var(--pink) 68%, var(--text));
+}
+
+.supervision-detail-lead p {
+  margin: 0;
+  line-height: 1.8;
+}
+
+.supervision-article {
+  display: grid;
+  gap: 0.95rem;
+}
+
+.supervision-article-section {
+  padding: 1.1rem 1.15rem;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 72%, transparent);
+  border-radius: 1.4rem;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-glass-strong) 90%, transparent), color-mix(in srgb, var(--surface-glass) 76%, transparent)),
+    color-mix(in srgb, var(--bg-panel) 84%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 16px 28px rgba(7, 10, 18, 0.08);
+}
+
+.supervision-article-section[data-role="supervisor"] {
+  border-color: color-mix(in srgb, var(--pink) 42%, rgba(255, 255, 255, 0.16));
+}
+
+.supervision-article-section[data-role="assistant"] {
+  border-color: color-mix(in srgb, var(--mint) 42%, rgba(255, 255, 255, 0.16));
+}
+
+.supervision-article-section[data-role="user"] {
+  border-color: color-mix(in srgb, var(--sky) 36%, rgba(255, 255, 255, 0.16));
+}
+
+.supervision-article-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+.supervision-article-section-head time {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.supervision-role-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2rem;
+  padding: 0.2rem 0.8rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-glass-strong) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line-strong) 70%, transparent);
+  font-weight: 700;
+}
+
+.supervision-article-section[data-role="supervisor"] .supervision-role-badge {
+  color: color-mix(in srgb, var(--pink) 70%, var(--text));
+}
+
+.supervision-article-section[data-role="assistant"] .supervision-role-badge {
+  color: color-mix(in srgb, var(--mint) 62%, var(--text));
+}
+
+.supervision-article-section[data-role="user"] .supervision-role-badge {
+  color: color-mix(in srgb, var(--sky) 68%, var(--text));
+}
+
+.supervision-article-body {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.supervision-article-paragraph {
+  margin: 0;
+  line-height: 1.85;
+  color: var(--text);
+}
+
+.supervision-article-paragraph strong {
+  color: color-mix(in srgb, var(--pink) 62%, var(--text));
+}
+
 @keyframes journalBorderSpin {
   from {
     transform: rotate(0deg);
@@ -5089,6 +5246,12 @@ a {
 
   .history-row-delete {
     min-height: 2.9rem;
+  }
+
+  .supervision-detail-actions,
+  .supervision-detail-meta,
+  .supervision-article-section-head {
+    align-items: flex-start;
   }
 
   .modal-inline-alert {

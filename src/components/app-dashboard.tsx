@@ -109,6 +109,53 @@ function formatDateOnly(value?: string) {
   return `${year}/${month}/${day}`;
 }
 
+function formatSupervisionRole(role: ChatMessage["role"]) {
+  if (role === "supervisor") {
+    return "督导师";
+  }
+  if (role === "assistant") {
+    return "咨询师";
+  }
+  if (role === "user") {
+    return "来访者";
+  }
+  return "系统";
+}
+
+function cleanMarkdownText(value: string) {
+  return value
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/_([^_]+)_/g, "$1")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/^>\s*/gm, "")
+    .replace(/^[-*+]\s*/gm, "")
+    .replace(/^\d+\.\s*/gm, "")
+    .replace(/\r/g, "")
+    .trim();
+}
+
+function parseSupervisionArticle(content: string) {
+  return cleanMarkdownText(content)
+    .split(/\n{2,}/)
+    .map((block) => block.split("\n").map((line) => line.trim()).filter(Boolean).join(" "))
+    .filter(Boolean)
+    .map((block) => {
+      const match = block.match(/^([^：:]{2,18})[：:]\s*(.+)$/);
+      if (!match) {
+        return { type: "paragraph" as const, content: block };
+      }
+      return {
+        type: "labeled" as const,
+        label: match[1].trim(),
+        content: match[2].trim()
+      };
+    });
+}
+
 function getNextSessionTitle(sessions: SessionRecord[]) {
   const highestIndex = sessions.reduce((max, session) => {
     const match = session.title.match(/^第(\d+)次会谈$/);
@@ -119,6 +166,17 @@ function getNextSessionTitle(sessions: SessionRecord[]) {
   }, 0);
 
   return `第${highestIndex + 1}次会谈`;
+}
+
+function resolveSessionForSupervisionRun(
+  sessions: SessionRecord[],
+  run: Pick<SupervisionRun, "id" | "sessionId">
+) {
+  return (
+    sessions.find((session) => session.id === run.sessionId) ??
+    sessions.find((session) => session.supervisionId === run.id) ??
+    null
+  );
 }
 
 function formatStreamingThinkingLine(thinking?: string) {
@@ -361,6 +419,7 @@ export function AppDashboard({ user }: { user: User }) {
   const [paceBusy, setPaceBusy] = useState(false);
   const [pacePanelOpen, setPacePanelOpen] = useState(false);
   const [mobileSessionBarCollapsed, setMobileSessionBarCollapsed] = useState(false);
+  const [selectedSupervisionRunId, setSelectedSupervisionRunId] = useState<string | null>(null);
 
   const activeSessionMeta =
     sessions.find((session) => session.id === selectedSessionId) ?? activeSession;
@@ -368,6 +427,11 @@ export function AppDashboard({ user }: { user: User }) {
   const headerSessionIsActive = headerSession?.status === "active";
   const completedSessions = sessions.filter((session) => session.status === "completed");
   const supervisionSessionMap = new Map(sessions.map((session) => [session.id, session]));
+  const selectedSupervisionRun =
+    supervisionRuns.find((run) => run.id === selectedSupervisionRunId) ?? null;
+  const selectedSupervisionSession = selectedSupervisionRun
+    ? resolveSessionForSupervisionRun(sessions, selectedSupervisionRun)
+    : null;
   const completedCount = completedSessions.length;
   const lastMessage = activeSession?.messages.at(-1);
   const activeSessionId = activeSession?.id;
@@ -697,6 +761,15 @@ export function AppDashboard({ user }: { user: User }) {
     void loadSessions();
     void loadJournals();
   }, [loadJournals, loadSessions]);
+
+  useEffect(() => {
+    if (
+      selectedSupervisionRunId &&
+      !supervisionRuns.some((run) => run.id === selectedSupervisionRunId)
+    ) {
+      setSelectedSupervisionRunId(null);
+    }
+  }, [selectedSupervisionRunId, supervisionRuns]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1260,8 +1333,21 @@ export function AppDashboard({ user }: { user: User }) {
     await loadSessionDetail(sessionId);
   }
 
+  async function openSessionForSupervisionRun(run: SupervisionRun) {
+    const matchedSession = resolveSessionForSupervisionRun(sessions, run);
+    if (!matchedSession) {
+      setNotice("未找到与该督导记录对应的存档会谈");
+      return;
+    }
+
+    await openSession(matchedSession.id);
+  }
+
   function handleViewChange(nextView: ViewMode) {
     setView(nextView);
+    if (nextView !== "supervision") {
+      setSelectedSupervisionRunId(null);
+    }
     setSidebarOpen(false);
   }
 
@@ -1771,57 +1857,138 @@ export function AppDashboard({ user }: { user: User }) {
 
             {view === "supervision" ? (
               <section className="supervision-records">
-              <div className="history-card supervision-card">
-                <div className="journal-header">
-                  <div>
-                    <h3>督导记录</h3>
-                    <p>每一次复盘，都是下一次靠近自己的预演。</p>
-                  </div>
-                  <span className="privacy-badge">{supervisionRuns.length} 条</span>
-                </div>
-
-                <div className="table-list">
-                {supervisionRuns.length === 0 ? (
-                  <div className="empty-state">
-                    还没有督导记录。完成一次会谈后，这里会出现。
-                  </div>
-                ) : (
-                  supervisionRuns.map((run) => (
-                    <div className="table-row table-row-button history-row" key={run.id}>
+              {selectedSupervisionRun ? (
+                <article className="journal-card supervision-detail-card">
+                  <div className="journal-header supervision-detail-header">
+                    <div>
+                      <h3>{selectedSupervisionSession?.title ?? "督导记录"}</h3>
+                    </div>
+                    <div className="supervision-detail-actions">
                       <button
-                        className="table-row-main history-row-main"
-                        onClick={() => void openSession(run.sessionId)}
+                        className="ghost-button"
+                        onClick={() => setSelectedSupervisionRunId(null)}
                         type="button"
                       >
-                        <div className="history-row-summary">
-                          <strong>
-                            {supervisionSessionMap.get(run.sessionId)?.title ?? "督导记录"}
-                          </strong>
-                          <p>{run.redactedSummary}</p>
-                        </div>
-                        <span className="history-row-cell history-row-mode">
-                          {supervisionSessionMap.get(run.sessionId)?.mode ?? "-"}
-                        </span>
-                        <span className="history-row-cell history-row-status">completed</span>
-                        <span className="history-row-cell history-row-count">{run.transcript.length} 轮</span>
-                        <span className="history-row-cell history-row-date">
-                          {formatDateOnly(run.completedAt)}
-                        </span>
+                        返回列表
                       </button>
-                      <div className="history-row-actions">
-                        <button
-                          className="ghost-button history-row-supervision"
-                          onClick={() => void openSession(run.sessionId)}
-                          type="button"
-                        >
-                          查看
-                        </button>
-                      </div>
+                      <button
+                        className="ghost-button"
+                        onClick={() => void openSessionForSupervisionRun(selectedSupervisionRun)}
+                        type="button"
+                      >
+                        打开会谈
+                      </button>
                     </div>
-                  ))
-                )}
+                  </div>
+
+                  <div className="supervision-detail-meta">
+                    <span className="privacy-badge">
+                      {selectedSupervisionSession?.mode ?? "-"}
+                    </span>
+                    <span className="supervision-detail-meta-item">
+                      完成于 {formatDateTime(selectedSupervisionRun.completedAt)}
+                    </span>
+                    <span className="supervision-detail-meta-item">
+                      {selectedSupervisionRun.transcript.length} 段记录
+                    </span>
+                  </div>
+
+                  <div className="supervision-detail-lead">
+                    <strong>督导摘要</strong>
+                    <p>{selectedSupervisionRun.redactedSummary}</p>
+                  </div>
+
+                  <div className="supervision-article">
+                    {selectedSupervisionRun.transcript.map((item) => {
+                      const blocks = parseSupervisionArticle(item.content);
+                      return (
+                        <section
+                          className="supervision-article-section"
+                          data-role={item.role}
+                          key={item.id}
+                        >
+                          <div className="supervision-article-section-head">
+                            <span className="supervision-role-badge">
+                              {formatSupervisionRole(item.role)}
+                            </span>
+                            <time>{formatDateTime(item.createdAt)}</time>
+                          </div>
+                          <div className="supervision-article-body">
+                            {blocks.map((block, index) =>
+                              block.type === "labeled" ? (
+                                <p className="supervision-article-paragraph" key={`${item.id}-${index}`}>
+                                  <strong>{block.label}：</strong>
+                                  <span>{block.content}</span>
+                                </p>
+                              ) : (
+                                <p className="supervision-article-paragraph" key={`${item.id}-${index}`}>
+                                  {block.content}
+                                </p>
+                              )
+                            )}
+                          </div>
+                        </section>
+                      );
+                    })}
+                  </div>
+                </article>
+              ) : (
+                <div className="history-card supervision-card">
+                  <div className="journal-header">
+                    <div>
+                      <h3>督导记录</h3>
+                      <p>每一次复盘，都是下一次靠近自己的预演。</p>
+                    </div>
+                    <span className="privacy-badge">{supervisionRuns.length} 条</span>
+                  </div>
+
+                  <div className="table-list">
+                  {supervisionRuns.length === 0 ? (
+                    <div className="empty-state">
+                      还没有督导记录。完成一次会谈后，这里会出现。
+                    </div>
+                  ) : (
+                    supervisionRuns.map((run) => {
+                      const matchedSession =
+                        supervisionSessionMap.get(run.sessionId) ??
+                        resolveSessionForSupervisionRun(sessions, run);
+
+                      return (
+                        <div className="table-row table-row-button history-row" key={run.id}>
+                          <button
+                            className="table-row-main history-row-main"
+                            onClick={() => setSelectedSupervisionRunId(run.id)}
+                            type="button"
+                          >
+                            <div className="history-row-summary">
+                              <strong>{matchedSession?.title ?? "督导记录"}</strong>
+                              <p>{run.redactedSummary}</p>
+                            </div>
+                            <span className="history-row-cell history-row-mode">
+                              {matchedSession?.mode ?? "-"}
+                            </span>
+                            <span className="history-row-cell history-row-status">completed</span>
+                            <span className="history-row-cell history-row-count">{run.transcript.length} 轮</span>
+                            <span className="history-row-cell history-row-date">
+                              {formatDateOnly(run.completedAt)}
+                            </span>
+                          </button>
+                          <div className="history-row-actions">
+                            <button
+                              className="ghost-button history-row-supervision"
+                              onClick={() => setSelectedSupervisionRunId(run.id)}
+                              type="button"
+                            >
+                              查看
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                  </div>
                 </div>
-              </div>
+              )}
               </section>
             ) : null}
           </div>
