@@ -2411,6 +2411,14 @@ a {
   justify-content: flex-end;
 }
 
+.session-inline-signals {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
 .chat-stage-session-signals {
   justify-content: flex-start;
 }
@@ -2985,7 +2993,7 @@ a {
 .sidebar-sessions-card {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.85rem;
 }
 
 .chat-stage {
@@ -3098,15 +3106,40 @@ a {
 
 .sidebar-session-list {
   max-height: none;
-  padding-right: 0.2rem;
-  gap: 0.95rem;
+  padding-right: 0.1rem;
+  gap: 0.7rem;
 }
 
 .sidebar-card-header {
   position: relative;
   z-index: 1;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   margin-bottom: 0.1rem;
+}
+
+.sidebar-card-header h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sidebar-card-header > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.9rem;
+  min-height: 1.9rem;
+  padding: 0 0.62rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 72%, transparent);
+  background: color-mix(in srgb, var(--surface-glass-strong) 82%, transparent);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  flex: 0 0 auto;
 }
 
 .session-delete-button {
@@ -3136,8 +3169,8 @@ a {
 
 .session-copy strong {
   display: block;
-  margin-bottom: 0.35rem;
-  line-height: 1.35;
+  margin-bottom: 0.18rem;
+  line-height: 1.3;
 }
 
 .session-copy p {
@@ -3148,9 +3181,43 @@ a {
 .session-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.6rem;
-  margin-top: 0.65rem;
-  font-size: 0.84rem;
+  align-items: center;
+  gap: 0.42rem 0.6rem;
+  margin-top: 0.42rem;
+  font-size: 0.8rem;
+}
+
+.sidebar-session-list .session-item {
+  padding: 0.78rem 0.8rem;
+  border-radius: 20px;
+  gap: 0.65rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02)),
+    color-mix(in srgb, var(--surface-glass) 82%, transparent);
+}
+
+.sidebar-session-list .session-main-button {
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.sidebar-session-list .session-copy strong {
+  font-size: 1rem;
+}
+
+.sidebar-session-list .session-meta {
+  margin-top: 0.36rem;
+}
+
+.sidebar-session-list .risk-dot {
+  width: 0.52rem;
+  height: 0.52rem;
+  margin-top: 0.08rem;
+}
+
+.sidebar-empty-state {
+  padding: 0.9rem 0.95rem;
+  border-radius: 20px;
 }
 
 .risk-dot {
@@ -4449,6 +4516,10 @@ a {
     justify-content: flex-start;
   }
 
+  .session-inline-signals {
+    flex-wrap: nowrap;
+  }
+
   .header-session-signals .signal-pill {
     min-height: 1.92rem;
     padding: 0.34rem 0.68rem;
@@ -4506,27 +4577,28 @@ a {
   }
 
   .header-session-signals {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    align-items: start;
-    gap: 0.35rem 0.45rem;
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+    flex-wrap: nowrap;
   }
 
   .session-mode-pill {
-    grid-column: 1 / -1;
-    width: 100%;
-    max-width: 100%;
+    width: auto;
+    max-width: none;
     min-width: 0;
+    flex: 1 1 auto;
     padding-inline: 0.78rem 0.84rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .pace-control {
-    grid-column: 2;
-    grid-row: 2;
-    justify-self: end;
+  .session-inline-signals {
+    flex: 0 1 auto;
+    justify-content: flex-end;
+    gap: 0.35rem;
   }
 
   .pace-icon-button {
@@ -4541,16 +4613,16 @@ a {
   }
 
   .session-time-pill {
-    grid-column: 3;
-    grid-row: 2;
     min-width: 0;
-    justify-self: end;
     padding-inline: 0.72rem;
   }
 
   .pace-popover {
-    left: auto;
-    right: 0;
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 8.2rem);
+    left: max(0.75rem, env(safe-area-inset-left, 0px));
+    right: max(0.75rem, env(safe-area-inset-right, 0px));
+    width: auto;
   }
 
   .session-stage-actions .primary-button,
@@ -4723,6 +4795,13 @@ a {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
+  .sidebar-card-header > span {
+    min-width: 1.75rem;
+    min-height: 1.75rem;
+    padding-inline: 0.55rem;
+    font-size: 0.84rem;
+  }
+
 }
 
 @media (max-width: 560px) {
@@ -4837,10 +4916,61 @@ a {
     gap: 0.45rem;
   }
 
+  .sidebar-sessions-card {
+    gap: 0.72rem;
+  }
+
+  .sidebar-card-header {
+    margin-bottom: 0;
+  }
+
+  .sidebar-session-list {
+    gap: 0.6rem;
+  }
+
+  .sidebar-session-list .session-item {
+    padding: 0.68rem 0.72rem;
+    border-radius: 18px;
+    gap: 0.58rem;
+  }
+
+  .sidebar-session-list .session-copy strong {
+    margin-bottom: 0.12rem;
+    font-size: 0.96rem;
+  }
+
+  .sidebar-session-list .session-meta {
+    margin-top: 0.28rem;
+    gap: 0.3rem 0.5rem;
+    font-size: 0.76rem;
+  }
+
+  .sidebar-session-list .session-delete-button {
+    min-width: 2.2rem;
+    min-height: 2.2rem;
+    border-radius: 14px;
+  }
+
   .header-session-signals .signal-pill {
     min-height: 1.8rem;
     padding: 0.28rem 0.6rem;
     font-size: 0.76rem;
+  }
+
+  .header-session-signals {
+    gap: 0.35rem;
+  }
+
+  .session-inline-signals {
+    gap: 0.28rem;
+  }
+
+  .pace-popover {
+    top: calc(env(safe-area-inset-top, 0px) + 7.6rem);
+    left: max(0.65rem, env(safe-area-inset-left, 0px));
+    right: max(0.65rem, env(safe-area-inset-right, 0px));
+    padding: 0.78rem;
+    border-radius: 20px;
   }
 
   .pace-icon-button {

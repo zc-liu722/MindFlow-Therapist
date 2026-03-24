@@ -1638,54 +1638,56 @@ export function AppDashboard({ user }: { user: User }) {
                   <div className="chat-stage-session-meta">
                     <div className="header-session-signals chat-stage-session-signals">
                       <span className="signal-pill session-mode-pill">{normalizeSessionMode(activeSession.mode)}</span>
-                      {activeSession.status === "active" ? (
-                        <div
-                          className={`pace-control${pacePanelOpen ? " is-open" : ""}`}
-                          data-pace-control-root="true"
-                        >
-                          <button
-                            aria-expanded={pacePanelOpen}
-                            aria-haspopup="dialog"
-                            aria-label={`对话速度，当前${activeSessionPaceMeta.label}`}
-                            className="signal-pill pace-icon-button"
-                            disabled={paceBusy || busy}
-                            onClick={() => setPacePanelOpen((current) => !current)}
-                            type="button"
+                      <div className="session-inline-signals">
+                        {activeSession.status === "active" ? (
+                          <div
+                            className={`pace-control${pacePanelOpen ? " is-open" : ""}`}
+                            data-pace-control-root="true"
                           >
-                            <PaceDialIcon />
-                            <span>{activeSessionPaceMeta.label}</span>
-                          </button>
-                          {pacePanelOpen ? (
-                            <div className="pace-popover" role="dialog" aria-label="对话速度设置">
-                              <p className="pace-popover-title">对话速度</p>
-                              <div className="pace-popover-options" role="tablist" aria-label="选择对话速度">
-                                {SESSION_PACE_CATALOG.map((pace) => (
-                                  <button
-                                    aria-selected={activeSessionPace === pace.value}
-                                    className={
-                                      activeSessionPace === pace.value
-                                        ? "pace-popover-option is-active"
-                                        : "pace-popover-option"
-                                    }
-                                    disabled={paceBusy || busy}
-                                    key={pace.value}
-                                    onClick={() => {
-                                      void updateSessionPaceValue(pace.value);
-                                      setPacePanelOpen(false);
-                                    }}
-                                    role="tab"
-                                    type="button"
-                                  >
-                                    <strong>{pace.label}</strong>
-                                    <span>{pace.description}</span>
-                                  </button>
-                                ))}
+                            <button
+                              aria-expanded={pacePanelOpen}
+                              aria-haspopup="dialog"
+                              aria-label={`对话速度，当前${activeSessionPaceMeta.label}`}
+                              className="signal-pill pace-icon-button"
+                              disabled={paceBusy || busy}
+                              onClick={() => setPacePanelOpen((current) => !current)}
+                              type="button"
+                            >
+                              <PaceDialIcon />
+                              <span>{activeSessionPaceMeta.label}</span>
+                            </button>
+                            {pacePanelOpen ? (
+                              <div className="pace-popover" role="dialog" aria-label="对话速度设置">
+                                <p className="pace-popover-title">对话速度</p>
+                                <div className="pace-popover-options" role="tablist" aria-label="选择对话速度">
+                                  {SESSION_PACE_CATALOG.map((pace) => (
+                                    <button
+                                      aria-selected={activeSessionPace === pace.value}
+                                      className={
+                                        activeSessionPace === pace.value
+                                          ? "pace-popover-option is-active"
+                                          : "pace-popover-option"
+                                      }
+                                      disabled={paceBusy || busy}
+                                      key={pace.value}
+                                      onClick={() => {
+                                        void updateSessionPaceValue(pace.value);
+                                        setPacePanelOpen(false);
+                                      }}
+                                      role="tab"
+                                      type="button"
+                                    >
+                                      <strong>{pace.label}</strong>
+                                      <span>{pace.description}</span>
+                                    </button>
+                                  ))}
+                                </div>
                               </div>
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : null}
-                      <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        <span className="signal-pill session-time-pill">{formatDateTime(activeSession.updatedAt)}</span>
+                      </div>
                     </div>
                   </div>
                   <div className="stage-actions session-stage-actions">
