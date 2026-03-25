@@ -1,5 +1,9 @@
 import { createId } from "@/lib/crypto";
 import { readDb, writeDb } from "@/lib/db";
+import type {
+  AdminOverviewResult,
+  ModerationAccountUpdateResult
+} from "@/lib/domain-types";
 import { getEffectiveModerationState } from "@/lib/guardrails";
 
 function formatModerationStatus(status: "active" | "suspended" | "banned") {
@@ -25,7 +29,7 @@ function groupByDay(dates: string[]) {
     .map(([date, count]) => ({ date, count }));
 }
 
-export async function getAdminOverview() {
+export async function getAdminOverview(): Promise<AdminOverviewResult> {
   const db = await readDb();
   const sessions = db.therapySessions;
   const completed = sessions.filter((item) => item.status === "completed");
@@ -123,7 +127,7 @@ export async function updateModerationAccount(input: {
   adminUserId: string;
   userId: string;
   action: "reinstate" | "clear_warnings";
-}) {
+}): Promise<ModerationAccountUpdateResult> {
   let updated = false;
   let result:
     | {

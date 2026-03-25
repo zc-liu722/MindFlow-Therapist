@@ -206,7 +206,10 @@ async function main() {
       userJar
     );
     assert(completeOnce.response.ok, `First completion failed: ${JSON.stringify(completeOnce.payload)}`);
-    assert(completeOnce.payload?.alreadyCompleted === false, "First completion should not be marked already completed");
+    assert(
+      completeOnce.payload?.result?.alreadyCompleted === false,
+      "First completion should not be marked already completed"
+    );
 
     const completeTwice = await requestJson(
       `/api/sessions/${sessionId}/complete`,
@@ -214,13 +217,16 @@ async function main() {
       userJar
     );
     assert(completeTwice.response.ok, `Second completion failed: ${JSON.stringify(completeTwice.payload)}`);
-    assert(completeTwice.payload?.alreadyCompleted === true, "Second completion should be idempotent");
+    assert(
+      completeTwice.payload?.result?.alreadyCompleted === true,
+      "Second completion should be idempotent"
+    );
 
     const supervisionJournal = await requestJson("/api/journal/supervision", {}, userJar);
     assert(supervisionJournal.response.ok, "Supervision journal fetch failed");
     assert(
-      Array.isArray(supervisionJournal.payload?.runs) &&
-        supervisionJournal.payload.runs.length === 1,
+      Array.isArray(supervisionJournal.payload?.supervisionJournal?.runs) &&
+        supervisionJournal.payload.supervisionJournal.runs.length === 1,
       "Repeated completion should not create duplicate supervision runs"
     );
 

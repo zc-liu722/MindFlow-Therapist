@@ -1,43 +1,36 @@
 import { NextResponse } from "next/server";
 
+import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
+import { errorResponse } from "@/lib/api-errors";
+import type { LoginRequestBody } from "@/lib/api-types";
+import {
+  applyOptionalIpRateLimit,
+  applyUserRateLimit,
+  parseJsonBody,
+  requireTrimmedString
+} from "@/lib/api-route";
+import { jsonWithKey } from "@/lib/api-response";
 import { createAuthSession, loginUser } from "@/lib/auth";
 import { createId } from "@/lib/crypto";
 import { writeDb } from "@/lib/db";
-import { assertRateLimit, getClientIp } from "@/lib/rate-limit";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = API_RUNTIME;
+export const dynamic = API_DYNAMIC;
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as {
-      username?: string;
-      password?: string;
-      role?: "user" | "admin";
-      privacyConsent?: boolean;
-      aiProcessingConsent?: boolean;
-    };
+    const body = await parseJsonBody<LoginRequestBody>(request);
 
-    if (!body.username?.trim()) {
-      return NextResponse.json({ error: "请输入用户名" }, { status: 400 });
+    const username = requireTrimmedString(body.username, "请输入用户名");
+    if (username instanceof NextResponse) {
+      return username;
     }
 
-    const clientIp = getClientIp(request);
-    if (clientIp) {
-      assertRateLimit({
-        key: `auth-login:ip:${clientIp}`,
-        limit: 10,
-        windowMs: 60_000
-      });
-    }
-    assertRateLimit({
-      key: `auth-login:user:${body.username.trim().toLowerCase()}`,
-      limit: 8,
-      windowMs: 60_000
-    });
+    applyOptionalIpRateLimit(request, "auth-login", 10, 60_000);
+    applyUserRateLimit("auth-login", username.toLowerCase(), 8, 60_000);
 
     const role = body.role ?? "user";
-    const { user } = await loginUser(body.username, body.password ?? "", {
+    const { user } = await loginUser(username, body.password ?? "", {
       requiredRole: role,
       privacyConsent: body.privacyConsent,
       aiProcessingConsent: body.aiProcessingConsent
@@ -54,26 +47,23 @@ export async function POST(request: Request) {
       });
     });
 
-    return NextResponse.json({
-      user: {
-        id: user.id,
-        displayName: user.displayName,
-        username: user.username,
-        role: user.role
-      }
+    return jsonWithKey("user", {
+      id: user.id,
+      displayName: user.displayName,
+      username: user.username,
+      role: user.role
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "登录失败";
-    const status =
-      message === "FORBIDDEN_ROLE"
-        ? 403
-        : message === "INVALID_CREDENTIALS"
-          ? 401
-          : message === "RATE_LIMITED"
-            ? 429
-            : message.includes("账号已")
-              ? 403
-            : 400;
-    return NextResponse.json({ error: message }, { status });
+    return errorResponse(
+      error,
+      "登录失败",
+      [
+        { match: "FORBIDDEN_ROLE", status: 403 },
+        { match: "INVALID_CREDENTIALS", status: 401 },
+        { match: "RATE_LIMITED", status: 429 },
+        { match: ({ message }) => message.includes("账号已"), status: 403 }
+      ],
+      400
+    );
   }
 }

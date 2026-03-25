@@ -1,69 +1,69 @@
 import { NextResponse } from "next/server";
 
 import { requireRole } from "@/lib/auth";
+import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
+import { errorResponse } from "@/lib/api-errors";
+import type { SessionCreateRequestBody } from "@/lib/api-types";
+import {
+  applyUserRateLimit,
+  parseJsonBody,
+  requireTrimmedString
+} from "@/lib/api-route";
+import { jsonWithKey } from "@/lib/api-response";
 import { createSession, listSessionsForUser } from "@/lib/domain";
-import { assertRateLimit } from "@/lib/rate-limit";
 import { DEFAULT_SESSION_MODE, normalizeSessionMode } from "@/lib/session-modes";
 import { DEFAULT_SESSION_PACE, normalizeSessionPace } from "@/lib/session-pace";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = API_RUNTIME;
+export const dynamic = API_DYNAMIC;
 
 export async function GET(request: Request) {
   try {
     const user = await requireRole("user");
-    assertRateLimit({
-      key: `sessions-list:user:${user.id}`,
-      limit: 120,
-      windowMs: 60_000
-    });
+    applyUserRateLimit("sessions-list", user.id, 120, 60_000);
     const sessions = await listSessionsForUser(user.id);
-    return NextResponse.json({ sessions });
+    return jsonWithKey("sessions", sessions);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "未授权";
-    const status = message === "RATE_LIMITED" ? 429 : 401;
-    return NextResponse.json({ error: message }, { status });
+    return errorResponse(error, "未授权", [{ match: "RATE_LIMITED", status: 429 }], 401);
   }
 }
 
 export async function POST(request: Request) {
   try {
     const user = await requireRole("user");
-    assertRateLimit({
-      key: `sessions-create:user:${user.id}`,
-      limit: 20,
-      windowMs: 60_000
-    });
-    const body = (await request.json()) as {
-      title?: string;
-      mode?: string;
-      pace?: string;
-    };
+    applyUserRateLimit("sessions-create", user.id, 20, 60_000);
+    const body = await parseJsonBody<SessionCreateRequestBody>(request);
 
-    if (!body.title) {
-      return NextResponse.json({ error: "请输入 session 标题" }, { status: 400 });
+    const title = requireTrimmedString(body.title, "请输入 session 标题");
+    if (title instanceof NextResponse) {
+      return title;
     }
 
     const session = await createSession(user, {
-      title: body.title,
+      title,
       mode: normalizeSessionMode(body.mode ?? DEFAULT_SESSION_MODE),
-      pace: normalizeSessionPace(body.pace ?? DEFAULT_SESSION_PACE)
+      pace: normalizeSessionPace(body.pace ?? DEFAULT_SESSION_PACE),
+      autoSupervision: body.autoSupervision
     });
 
-    return NextResponse.json({ session });
+    return jsonWithKey("session", session);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "创建失败";
-    const status =
-      message === "UNAUTHORIZED"
-        ? 401
-        : message === "FORBIDDEN"
-          ? 403
-          : message === "RATE_LIMITED"
-            ? 429
-          : message.startsWith("CURSOR_RULE_LOAD_FAILED:") ||
-              message.startsWith("CURSOR_MOD_RULE_LOAD_FAILED:")
-            ? 503
-            : 500;
-    return NextResponse.json({ error: message }, { status });
+    return errorResponse(
+      error,
+      "创建失败",
+      [
+        { match: "UNAUTHORIZED", status: 401 },
+        { match: "FORBIDDEN", status: 403 },
+        { match: "ACTIVE_SESSION_EXISTS", status: 409 },
+        { match: "RATE_LIMITED", status: 429 },
+        {
+          match: ({ message }) =>
+            message.startsWith("CURSOR_RULE_LOAD_FAILED:") ||
+            message.startsWith("CURSOR_MOD_RULE_LOAD_FAILED:"),
+          status: 503
+        }
+      ],
+      500
+    );
   }
 }

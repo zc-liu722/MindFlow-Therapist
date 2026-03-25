@@ -1,32 +1,23 @@
-import type { MessageRole, RiskLevel, SessionStatus } from "@/lib/types";
+import { getSessionPaceMeta, normalizeSessionPace } from "@/lib/session-pace";
+import type { AppSessionDetail as SessionDetail } from "@/lib/app-dashboard-types";
 
-type ProgressMessage = {
-  role: MessageRole;
-  content: string;
-  createdAt: string;
-};
+export type SessionProgressPhase = "opening" | "exploring" | "deepening" | "closing" | "completed";
 
-type SessionProgressInput = {
-  createdAt: string;
-  mode: string;
-  status: SessionStatus;
-  riskLevel?: RiskLevel;
-  messages: ProgressMessage[];
-};
-
-export type SessionProgressSnapshot = {
+export type SessionProgress = {
   percent: number;
-  phase: "opening" | "exploration" | "integration" | "closing" | "completed";
+  phase: SessionProgressPhase;
   phaseLabel: string;
   summary: string;
   detailLabel: string;
 };
 
-const PROGRESS_PHASE_THRESHOLDS = {
-  opening: 24,
-  exploration: 60,
-  integration: 86
-} as const;
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function countMatches(text: string, pattern: RegExp) {
+  return text.match(pattern)?.length ?? 0;
+}
 
 const THEME_PATTERNS: Array<[string, RegExp]> = [
   ["关系压力", /(关系|伴侣|家庭|父母|婚姻|朋友|同事|社交)/g],
@@ -37,18 +28,20 @@ const THEME_PATTERNS: Array<[string, RegExp]> = [
   ["价值与意义", /(意义|价值|迷茫|空心|活着|人生方向)/g]
 ];
 
-const EMOTION_PATTERNS = /(难受|痛苦|委屈|压抑|害怕|焦虑|崩溃|绝望|愤怒|内疚|羞耻|孤独|无力|疲惫|麻木|心慌|失眠|担心)/g;
-const REFLECTION_PATTERNS = /(我听见|我留意到|听起来|似乎|也许|如果愿意|我们先|一起看看|你提到|你刚刚说)/g;
-const ACTION_PATTERNS = /(这周|接下来|试着|练习|带着|记下来|留意|下次|可以做|具体一点)/g;
-const CLOSING_PATTERNS = /(总结一下|收一收|收束|今天先到这里|结束前|最后想邀请你|带走|回顾一下|下次我们|本次先|今天的会谈)/g;
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function countMatches(text: string, pattern: RegExp) {
-  return text.match(pattern)?.length ?? 0;
-}
+const REFLECTION_PATTERNS =
+  /(我听见|我留意到|听起来|似乎|也许|如果愿意|我们先|一起看看|你提到|你刚刚说|像是|好像)/g;
+const ACTION_PATTERNS =
+  /(接下来|试着|练习|带着|记下来|留意|下次|可以做|一步|先做什么|这周)/g;
+const SOFT_CLOSING_PATTERNS =
+  /(先帮你收一收|先整理一下|我们先放在这里看看|如果先把重点收一收|到这里我会先听见|先记住这几点)/g;
+const HARD_CLOSING_PATTERNS =
+  /(总结一下|今天先到这里|结束前|最后想邀请你|带走|回顾一下|今天的会谈|下次我们可以)/g;
+const DISCOVERY_PATTERNS =
+  /(还有|另外|其实|刚刚想到|还有一件事|我突然想到|补充一下|不止|而且|同时|还有个问题)/g;
+const USER_SUMMARY_PATTERNS =
+  /(好像是|我发现|其实我更在意|说到底|归根结底|所以我现在|我想我可能|听你这么说)/g;
+const HIGH_INTENSITY_PATTERNS =
+  /(特别难受|太痛苦了|崩溃|受不了|完全撑不住|真的很想哭|停不下来|压得喘不过气|特别害怕)/g;
 
 function summarizeThemes(text: string) {
   return THEME_PATTERNS
@@ -56,211 +49,212 @@ function summarizeThemes(text: string) {
     .map(([label]) => label);
 }
 
-function resolvePhaseFromPercent(percent: number): SessionProgressSnapshot["phase"] {
-  if (percent >= PROGRESS_PHASE_THRESHOLDS.integration) {
-    return "closing";
+export function estimateSessionProgress(session: SessionDetail): SessionProgress {
+  const pace = normalizeSessionPace(session.pace);
+  const paceMeta = getSessionPaceMeta(pace);
+
+  if (session.status === "completed") {
+    return {
+      percent: 100,
+      phase: "completed",
+      phaseLabel: "会谈已完成",
+      summary: "这段会谈已经收束，可以回看整理后的摘要、手帐与督导记录。",
+      detailLabel: `${session.messageCount} 条消息`
+    };
   }
 
-  if (percent >= PROGRESS_PHASE_THRESHOLDS.exploration) {
-    return "integration";
-  }
-
-  if (percent >= PROGRESS_PHASE_THRESHOLDS.opening) {
-    return "exploration";
-  }
-
-  return "opening";
-}
-
-function resolveActivePhaseFromPercent(
-  percent: number
-): Exclude<SessionProgressSnapshot["phase"], "completed"> {
-  return resolvePhaseFromPercent(percent) as Exclude<
-    SessionProgressSnapshot["phase"],
-    "completed"
-  >;
-}
-
-export function estimateSessionProgress(
-  session: SessionProgressInput
-): SessionProgressSnapshot {
   const visibleMessages = session.messages.filter(
     (message) => message.role === "user" || message.role === "assistant"
   );
   const userMessages = visibleMessages.filter((message) => message.role === "user");
   const assistantMessages = visibleMessages.filter((message) => message.role === "assistant");
   const exchangeCount = Math.min(userMessages.length, assistantMessages.length);
-  const conversationText = userMessages.map((message) => message.content).join("\n");
-  const recentText = visibleMessages.slice(-4).map((message) => message.content).join("\n");
+  const userText = userMessages.map((message) => message.content).join("\n");
+  const assistantText = assistantMessages.map((message) => message.content).join("\n");
+  const recentUserText = userMessages.slice(-3).map((message) => message.content).join("\n");
+  const recentAssistantText = assistantMessages.slice(-3).map((message) => message.content).join("\n");
 
   const userChars = userMessages.reduce((sum, message) => sum + message.content.trim().length, 0);
-  const assistantChars = assistantMessages.reduce(
-    (sum, message) => sum + message.content.trim().length,
-    0
-  );
   const longestUserMessage = userMessages.reduce(
     (longest, message) => Math.max(longest, message.content.trim().length),
     0
   );
   const averageUserLength = userMessages.length > 0 ? userChars / userMessages.length : 0;
-  const themes = summarizeThemes(conversationText);
-  const emotionHits = countMatches(conversationText, EMOTION_PATTERNS);
-  const reflectionHits = countMatches(
-    assistantMessages.map((message) => message.content).join("\n"),
-    REFLECTION_PATTERNS
-  );
-  const actionHits = countMatches(
-    assistantMessages.map((message) => message.content).join("\n"),
-    ACTION_PATTERNS
-  );
-  const closingCueScore = clamp(countMatches(recentText, CLOSING_PATTERNS) / 3, 0, 1);
-  const themeCoverage = clamp(themes.length / 4, 0, 1);
+  const themes = summarizeThemes(userText);
+
   const disclosureDepth = clamp(
     averageUserLength / 220 + longestUserMessage / 520 + userChars / 2200,
     0,
     1
   );
-  const emotionDensity = clamp(emotionHits / Math.max(userMessages.length * 3, 4), 0, 1);
-  const reflectionScore = clamp(reflectionHits / 5, 0, 1);
-  const actionScore = clamp(actionHits / 4, 0, 1);
-  const reciprocityScore = clamp(
-    assistantMessages.length / Math.max(userMessages.length, 1) / 1.2 +
-      assistantChars / Math.max(userChars, 1) / 1.6,
+  const themeScore = clamp(themes.length / 4, 0, 1);
+  const reflectionScore = clamp(countMatches(assistantText, REFLECTION_PATTERNS) / 5, 0, 1);
+  const actionScore = clamp(countMatches(assistantText, ACTION_PATTERNS) / 4, 0, 1);
+  const softClosureScore = clamp(countMatches(recentAssistantText, SOFT_CLOSING_PATTERNS) / 2, 0, 1);
+  const hardClosureScore = clamp(countMatches(recentAssistantText, HARD_CLOSING_PATTERNS) / 2, 0, 1);
+  const discoveryScore = clamp(countMatches(recentUserText, DISCOVERY_PATTERNS) / 3, 0, 1);
+  const userSummaryScore = clamp(countMatches(recentUserText, USER_SUMMARY_PATTERNS) / 2, 0, 1);
+  const intensityScore = clamp(countMatches(recentUserText, HIGH_INTENSITY_PATTERNS) / 2, 0, 1);
+  const turnProgress = clamp(exchangeCount / Math.max(paceMeta.targetTurns, 1), 0, 1);
+
+  const contentOpening = clamp(
+    (userMessages.length > 0 ? 0.38 : 0) +
+      (assistantMessages.length > 0 ? 0.24 : 0) +
+      (userChars > 80 ? 0.16 : 0) +
+      Math.min(exchangeCount / 3, 1) * 0.22,
+    0,
+    1
+  );
+  const contentExploring = clamp(
+    disclosureDepth * 0.32 +
+      themeScore * 0.24 +
+      discoveryScore * 0.18 +
+      reflectionScore * 0.1 +
+      turnProgress * 0.16,
+    0,
+    1
+  );
+  const contentDeepening = clamp(
+    reflectionScore * 0.34 +
+      userSummaryScore * 0.16 +
+      themeScore * 0.16 +
+      actionScore * 0.08 +
+      clamp((turnProgress - 0.22) / 0.48, 0, 1) * 0.26,
+    0,
+    1
+  );
+  const closureReadiness = clamp(
+    contentDeepening * 0.34 +
+      actionScore * 0.16 +
+      softClosureScore * 0.16 +
+      hardClosureScore * 0.14 +
+      userSummaryScore * 0.12 +
+      turnProgress * 0.08,
+    0,
+    1
+  );
+  const expansionPressure = clamp(
+    discoveryScore * 0.4 + intensityScore * 0.28 + (1 - userSummaryScore) * 0.12,
     0,
     1
   );
 
-  const openingWork = clamp(
-    (userMessages.length > 0 ? 0.45 : 0) +
-      (userChars > 90 ? 0.25 : 0) +
-      (assistantMessages.length > 0 ? 0.3 : 0),
+  const paceBias =
+    pace === "fast"
+      ? { phaseBias: 0.08, percentBias: 8, closeBoost: 0.08, expandPenalty: 0.03 }
+      : pace === "slow"
+        ? { phaseBias: -0.08, percentBias: -8, closeBoost: -0.08, expandPenalty: -0.03 }
+        : { phaseBias: 0, percentBias: 0, closeBoost: 0, expandPenalty: 0 };
+
+  const adjustedExploring = clamp(contentExploring + paceBias.phaseBias * 0.35, 0, 1);
+  const adjustedDeepening = clamp(
+    contentDeepening + paceBias.phaseBias * 0.55 - expansionPressure * 0.06,
     0,
     1
   );
-  const explorationWork = clamp(
-    userChars / 950 * 0.4 + themeCoverage * 0.22 + disclosureDepth * 0.25 + emotionDensity * 0.13,
+  const adjustedClosure = clamp(
+    closureReadiness + paceBias.closeBoost - expansionPressure * (0.16 + paceBias.expandPenalty),
     0,
     1
   );
-  const integrationWork = clamp(
-    assistantMessages.length / 5 * 0.18 +
-      reflectionScore * 0.38 +
-      actionScore * 0.24 +
-      reciprocityScore * 0.2,
-    0,
-    1
-  );
-  const stageSeeds = {
-    opening: clamp(openingWork, 0, 1),
-    exploration: clamp(
-      explorationWork * 0.72 + themeCoverage * 0.16 + disclosureDepth * 0.12,
-      0,
-      1
-    ),
-    integration: clamp(integrationWork * 0.68 + reflectionScore * 0.18 + actionScore * 0.14, 0, 1),
-    closing: clamp(closingCueScore * 0.72 + actionScore * 0.28, 0, 1)
-  };
-  const turnCoverage = {
-    opening: clamp(exchangeCount / 2, 0, 1),
-    exploration: clamp(exchangeCount / 5, 0, 1),
-    integration: clamp(exchangeCount / 8, 0, 1),
-    closing: clamp(exchangeCount / 11, 0, 1)
-  } as const;
 
-  const phase =
-    session.status === "completed"
-      ? "completed"
-      : closingCueScore > 0.55 || actionScore > 0.72
-        ? "closing"
-        : integrationWork >= 0.58 || reflectionScore > 0.5
-          ? "integration"
-          : explorationWork >= 0.24 || userMessages.length >= 2 || themes.length > 0
-            ? "exploration"
-            : "opening";
-
-  const progressRanges = {
-    opening: [0, 22],
-    exploration: [24, 58],
-    integration: [60, 84],
-    closing: [86, 99]
-  } as const;
-
-  if (phase === "completed") {
-    return {
-      percent: 100,
-      phase,
-      phaseLabel: "本次会谈已完成",
-      summary: "会谈已归档，可回看记录与督导内容。",
-      detailLabel: "四个阶段已全部结束"
-    };
+  let phase: Exclude<SessionProgressPhase, "completed"> = "opening";
+  if (adjustedClosure >= 0.6 && expansionPressure <= 0.76) {
+    phase = "closing";
+  } else if (adjustedDeepening >= 0.48) {
+    phase = "deepening";
+  } else if (adjustedExploring >= 0.28 || userMessages.length >= 2 || themes.length > 0) {
+    phase = "exploring";
   }
 
-  const [start, end] = progressRanges[phase];
-  const turnSeed = turnCoverage[phase];
-  const seedBase = Math.max(stageSeeds[phase], turnSeed * 0.82);
-  const closingApproach =
+  const basePercent =
+    phase === "opening"
+      ? contentOpening * 24
+      : phase === "exploring"
+        ? 24 + adjustedExploring * 34
+        : phase === "deepening"
+          ? 60 + adjustedDeepening * 24
+          : 86 + adjustedClosure * 10;
+
+  const boundedPercentBias =
+    phase === "opening"
+      ? paceBias.percentBias * 0.35
+      : phase === "exploring"
+        ? paceBias.percentBias * 0.7
+        : phase === "deepening"
+          ? paceBias.percentBias
+          : paceBias.percentBias * 0.85;
+
+  const percent = clamp(
+    Math.round(basePercent + boundedPercentBias - expansionPressure * 3),
+    0,
+    99
+  );
+
+  if (percent >= 86) {
+    phase = "closing";
+  } else if (percent >= 60) {
+    phase = "deepening";
+  } else if (percent >= 24) {
+    phase = "exploring";
+  } else {
+    phase = "opening";
+  }
+
+  const detailLabel =
     phase === "closing"
-      ? clamp(
-          Math.max(
-            seedBase,
-            closingCueScore * 0.94,
-            actionScore * 0.9,
-            turnSeed * 0.9,
-            clamp((exchangeCount - 8) / 4, 0, 1) * 0.92 + closingCueScore * 0.08
-          ),
-          0,
-          1
-        )
-      : seedBase;
-  const seed = phase === "closing" ? closingApproach : seedBase;
-  const heuristicPercent = Math.round(start + (end - start) * seed);
-  const turnDrivenFloor =
-    visibleMessages.length > 0
-      ? clamp(
-          phase === "closing"
-            ? 88 + Math.max(0, visibleMessages.length - 12)
-            : 6 + visibleMessages.length,
-          0,
-          99
-        )
-      : 0;
-  const percent = clamp(Math.max(heuristicPercent, turnDrivenFloor), 0, 99);
-  const displayPhase = resolveActivePhaseFromPercent(percent);
-  const displayPhaseCopy = {
-    opening: {
-      phaseLabel: "正在建立本次会谈焦点",
-      summary: "先把当前最需要被看见的情绪、情境和期待摆到台面上。",
-      detailLabel: userMessages.length > 0 ? "已接住开场信息" : "等待第一条消息"
-    },
-    exploration: {
-      phaseLabel: "正在展开体验与关键主题",
-      summary: "会结合谈话内容继续深入，同时每轮对话都会稳步向前推进。",
-      detailLabel:
-        themes.length > 0
-          ? `已浮现 ${themes.length} 个主题`
-          : `已完成 ${visibleMessages.length} 轮对话推进`
-    },
-    integration: {
-      phaseLabel: "正在整理线索并形成理解",
-      summary: "会把已经浮现的模式和感受串起来，慢慢靠近更清晰的理解。",
-      detailLabel:
-        reflectionHits > 0
-          ? `已出现 ${reflectionHits} 次反思回应`
-          : "开始归拢已经出现的线索"
-    },
-    closing: {
-      phaseLabel: "正在收束本次会谈",
-      summary: "开始把重点收拢成可带走的线索、提醒或下次继续的方向。",
-      detailLabel:
-        actionHits > 0 ? `已形成 ${actionHits} 个行动/收束线索` : "正在整理可带走的重点"
-    }
-  }[displayPhase];
+      ? adjustedClosure >= 0.78 && expansionPressure < 0.34
+        ? "已具备重收束条件"
+        : "已具备轻收束条件"
+      : phase === "deepening"
+        ? reflectionScore > 0
+          ? `已出现 ${Math.max(1, Math.round(reflectionScore * 5))} 次整理/反思信号`
+          : "线索开始从展开转向整理"
+        : phase === "exploring"
+          ? discoveryScore > 0.45
+            ? "最近仍在出现新的重要内容"
+            : themes.length > 0
+              ? `已浮现 ${themes.length} 个主题`
+              : "正在继续澄清和展开"
+          : userMessages.length > 0
+            ? "已开始承接当前困扰"
+            : "等待第一条消息";
+
+  const summary =
+    phase === "closing"
+      ? adjustedClosure >= 0.78 && expansionPressure < 0.34
+        ? "当前内容已经比较完整，可以做更明确的总结与收束；如果你继续展开，进度也会重新放缓。"
+        : "当前已具备初步收束条件，系统会先做温和整理，但不会因为速度设置而突然结束。"
+      : phase === "deepening"
+        ? pace === "fast"
+          ? "线索开始成形，快速节奏会让进度更偏向整理，但仍以内容走向为准。"
+          : pace === "slow"
+            ? "虽然已经进入整理区间，但慢速节奏会保留更多继续展开和停留的空间。"
+            : "会把已出现的模式、情绪和想法慢慢串起来，形成更清晰的理解。"
+        : phase === "exploring"
+          ? pace === "fast"
+            ? "会更积极帮助聚焦重点，所以进度会略微更靠前，但只要你还在持续展开重要内容，就不会强行收束。"
+            : pace === "slow"
+              ? "会保留更多倾听和停留空间，所以同样内容下进度会稍微更保守。"
+              : "会在承接和推进之间保持平衡，优先跟随当前最重要的内容。"
+          : `当前以${paceMeta.label}倾向推进，会先确保情绪和处境被接住，再决定是否继续深入。`;
+
+  const phaseLabel =
+    phase === "opening"
+      ? "开始铺陈"
+      : phase === "exploring"
+        ? "进入探索"
+        : phase === "deepening"
+          ? "继续深入"
+          : adjustedClosure >= 0.78 && expansionPressure < 0.34
+            ? "接近重收束"
+            : "接近轻收束";
 
   return {
     percent,
-    phase: displayPhase,
-    phaseLabel: displayPhaseCopy.phaseLabel,
-    summary: displayPhaseCopy.summary,
-    detailLabel: displayPhaseCopy.detailLabel
+    phase,
+    phaseLabel,
+    summary,
+    detailLabel
   };
 }

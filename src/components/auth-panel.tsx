@@ -2,44 +2,17 @@
 
 import { type FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-
-type Role = "user" | "admin";
+import type { ApiErrorPayload, PublicUser, UserPayload } from "@/lib/api-types";
+import { getAuthErrorMessage } from "@/lib/client-errors";
+import { readJsonResponse } from "@/lib/client-response";
+import type { Role } from "@/lib/types";
 type AuthMode = "login" | "register";
 type ThemePreference = "system" | "light" | "dark";
 
 const THEME_STORAGE_KEY = "mindflow-theme-preference";
 
-type AuthResponse = {
-  error?: string;
-  user?: {
-    id: string;
-    displayName: string;
-    username: string;
-    role: Role;
-  };
-};
-
 function normalizeUsername(value: string) {
   return value.trim().toLowerCase();
-}
-
-function mapErrorMessage(message?: string) {
-  switch (message) {
-    case "USER_NOT_FOUND":
-      return "未找到该账号，请先注册。";
-    case "INVALID_CREDENTIALS":
-      return "用户名或密码不正确。";
-    case "FORBIDDEN_ROLE":
-      return "该账号没有对应入口权限。";
-    case "PRIVACY_CONSENT_REQUIRED":
-      return "请先同意内容加密存储于服务器。";
-    case "AI_CONSENT_REQUIRED":
-      return "请先同意内容上传模型进行分析。";
-    case "RATE_LIMITED":
-      return "操作过于频繁，请稍后再试。";
-    default:
-      return message ?? "暂时无法继续，请稍后再试。";
-  }
 }
 
 function SunIcon() {
@@ -241,13 +214,14 @@ export function AuthPanel() {
         })
       });
 
-      const payload = (await response.json()) as AuthResponse;
-      if (!response.ok || !payload.user) {
-        setError(mapErrorMessage(payload.error));
+      const payload = await readJsonResponse<ApiErrorPayload & UserPayload>(response);
+      const signedInUser = (payload?.user as PublicUser | null | undefined) ?? null;
+      if (!response.ok || !signedInUser) {
+        setError(getAuthErrorMessage(payload?.error));
         return;
       }
 
-      router.push(payload.user.role === "admin" ? "/admin" : "/app");
+      router.push(signedInUser.role === "admin" ? "/admin" : "/app");
       router.refresh();
     } catch {
       setError("网络暂时不可用，请稍后再试");
@@ -258,25 +232,6 @@ export function AuthPanel() {
 
   return (
     <main className="landing-shell">
-      <div className="landing-motion landing-motion-mist" />
-      <div className="landing-motion landing-motion-orbit" />
-      <div className="landing-motion landing-motion-beam" />
-      <div className="landing-ribbon landing-ribbon-left" />
-      <div className="landing-ribbon landing-ribbon-right" />
-      <div className="landing-prism landing-prism-top" />
-      <div className="landing-prism landing-prism-bottom" />
-      <div className="landing-particles" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-        <span />
-        <span />
-        <span />
-      </div>
-      <div className="landing-glow landing-glow-left" />
-      <div className="landing-glow landing-glow-right" />
-      <div className="landing-gridline" />
-
       <section className="hero auth-hero">
         <div className="hero-copy auth-hero-copy">
           <span className="eyebrow auth-eyebrow">MindFlow Therapist</span>

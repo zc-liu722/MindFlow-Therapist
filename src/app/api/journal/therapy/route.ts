@@ -1,25 +1,20 @@
-import { NextResponse } from "next/server";
-
+import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
+import { errorResponse } from "@/lib/api-errors";
+import { applyUserRateLimit } from "@/lib/api-route";
+import { jsonWithKey } from "@/lib/api-response";
 import { requireRole } from "@/lib/auth";
 import { getTherapyJournal } from "@/lib/domain";
-import { assertRateLimit } from "@/lib/rate-limit";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = API_RUNTIME;
+export const dynamic = API_DYNAMIC;
 
 export async function GET(request: Request) {
   try {
     const user = await requireRole("user");
-    assertRateLimit({
-      key: `therapy-journal:user:${user.id}`,
-      limit: 120,
-      windowMs: 60_000
-    });
+    applyUserRateLimit("therapy-journal", user.id, 120, 60_000);
     const journal = await getTherapyJournal(user.id);
-    return NextResponse.json(journal);
+    return jsonWithKey("therapyJournal", journal);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "未授权";
-    const status = message === "RATE_LIMITED" ? 429 : 401;
-    return NextResponse.json({ error: message }, { status });
+    return errorResponse(error, "未授权", [{ match: "RATE_LIMITED", status: 429 }], 401);
   }
 }

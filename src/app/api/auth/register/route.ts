@@ -1,46 +1,36 @@
 import { NextResponse } from "next/server";
 
+import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
+import { errorResponse } from "@/lib/api-errors";
+import type { RegisterRequestBody } from "@/lib/api-types";
+import {
+  applyOptionalIpRateLimit,
+  applyUserRateLimit,
+  parseJsonBody,
+  requireTrimmedString
+} from "@/lib/api-route";
+import { jsonWithKey } from "@/lib/api-response";
 import { createAuthSession, registerUser } from "@/lib/auth";
 import { createId } from "@/lib/crypto";
 import { writeDb } from "@/lib/db";
-import { assertRateLimit, getClientIp } from "@/lib/rate-limit";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = API_RUNTIME;
+export const dynamic = API_DYNAMIC;
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as {
-      username?: string;
-      displayName?: string;
-      password?: string;
-      role?: "user" | "admin";
-      adminInviteCode?: string;
-      privacyConsent?: boolean;
-      aiProcessingConsent?: boolean;
-    };
+    const body = await parseJsonBody<RegisterRequestBody>(request);
 
-    if (!body.username?.trim()) {
-      return NextResponse.json({ error: "请输入用户名" }, { status: 400 });
+    const username = requireTrimmedString(body.username, "请输入用户名");
+    if (username instanceof NextResponse) {
+      return username;
     }
 
-    const username = body.username.trim();
     const password = body.password ?? "";
     const displayName = body.displayName?.trim() || username;
 
-    const clientIp = getClientIp(request);
-    if (clientIp) {
-      assertRateLimit({
-        key: `auth-register:ip:${clientIp}`,
-        limit: 6,
-        windowMs: 10 * 60_000
-      });
-    }
-    assertRateLimit({
-      key: `auth-register:user:${username.toLowerCase()}`,
-      limit: 4,
-      windowMs: 10 * 60_000
-    });
+    applyOptionalIpRateLimit(request, "auth-register", 6, 10 * 60_000);
+    applyUserRateLimit("auth-register", username.toLowerCase(), 4, 10 * 60_000);
 
     const user = await registerUser({
       username,
@@ -63,23 +53,24 @@ export async function POST(request: Request) {
       });
     });
 
-    return NextResponse.json({
-      user: {
-        id: user.id,
-        displayName: user.displayName,
-        username: user.username,
-        role: user.role
-      }
+    return jsonWithKey("user", {
+      id: user.id,
+      displayName: user.displayName,
+      username: user.username,
+      role: user.role
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "注册失败";
-    const status =
-      message === "RATE_LIMITED"
-        ? 429
-        : message === "ADMIN_INVITE_CODE_MISSING" ||
-            message === "ADMIN_INVITE_CODE_INSECURE"
-          ? 503
-          : 400;
-    return NextResponse.json({ error: message }, { status });
+    return errorResponse(
+      error,
+      "注册失败",
+      [
+        { match: "RATE_LIMITED", status: 429 },
+        {
+          match: ["ADMIN_INVITE_CODE_MISSING", "ADMIN_INVITE_CODE_INSECURE"],
+          status: 503
+        }
+      ],
+      400
+    );
   }
 }

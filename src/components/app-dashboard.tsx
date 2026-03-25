@@ -1,19 +1,45 @@
 "use client";
 
 import {
-  type FormEvent,
   type KeyboardEvent,
   type UIEvent,
   type MouseEvent,
   type ReactNode,
-  useCallback,
+  memo,
   useEffect,
-  useRef,
   useState
 } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { estimateSessionProgress } from "@/lib/session-progress";
+import { useAppTheme } from "@/hooks/use-app-theme";
+import { useDashboardData } from "@/hooks/use-dashboard-data";
+import {
+  useDashboardChatUi
+} from "@/hooks/use-dashboard-chat-ui";
+import { useSessionActions } from "@/hooks/use-session-actions";
+import {
+  useDashboardUiState,
+  type DashboardViewMode as ViewMode
+} from "@/hooks/use-dashboard-ui-state";
+import type { SessionProgress } from "@/lib/session-progress";
+import {
+  formatSessionStatusLabel,
+  formatStreamingThinkingLine,
+  formatSupervisionRole,
+  formatSupervisionTitle,
+  getNextSessionTitle,
+  isStreamNearBottom,
+  parseJournalBlocks,
+  parseSupervisionArticle,
+  resolveSessionForSupervisionRun
+} from "@/lib/app-dashboard-utils";
+import { formatDateOnly, formatDateTime } from "@/lib/date-format";
+import { getDashboardDerivedState } from "@/lib/app-dashboard-selectors";
+import { ACTIVE_SESSION_EXISTS_MESSAGE } from "@/lib/client-errors";
+import type {
+  AppChatMessage as ChatMessage,
+  AppViewerUser as User
+} from "@/lib/app-dashboard-types";
 import {
   DEFAULT_SESSION_MODE,
   SESSION_MODE_CATALOG,
@@ -21,200 +47,49 @@ import {
   type SessionMode
 } from "@/lib/session-modes";
 import {
-  DEFAULT_SESSION_PACE,
   SESSION_PACE_CATALOG,
-  getSessionPaceMeta,
-  normalizeSessionPace,
   type SessionPace
 } from "@/lib/session-pace";
 
-type User = {
-  id: string;
-  displayName: string;
-  username: string;
-};
-
-type SessionRecord = {
-  id: string;
-  title: string;
-  mode: string;
-  pace: SessionPace;
-  status: "active" | "completed";
-  autoSupervision: boolean;
-  updatedAt: string;
-  createdAt: string;
-  redactedSummary: string;
-  messageCount: number;
-  riskLevel: "low" | "medium" | "high";
-  supervisionId?: string;
-  supervisionFailureReason?: string;
-  supervisionFailedAt?: string;
-};
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant" | "supervisor" | "system";
-  content: string;
-  createdAt: string;
-  thinking?: string;
-  rawThinking?: string;
-  isStreaming?: boolean;
-  streamingDone?: boolean;
-  animateIn?: boolean;
-};
-
-type SessionDetail = SessionRecord & {
-  messages: ChatMessage[];
-};
-
-type SupervisionRun = {
-  id: string;
-  sessionId: string;
-  createdAt: string;
-  completedAt: string;
-  redactedSummary: string;
-  transcript: ChatMessage[];
-};
-
-type ViewMode = "chat" | "history" | "therapy" | "supervision";
-type ThemePreference = "system" | "light" | "dark";
-
 const THEME_STORAGE_KEY = "mindflow-theme-preference";
 
-function formatDateTime(value?: string) {
-  if (!value) {
-    return "-";
+function JournalContent({ content }: { content: string }) {
+  const blocks = parseJournalBlocks(content);
+
+  if (blocks.length === 0) {
+    return <p className="journal-empty">暂无内容。</p>;
   }
 
-  const date = new Date(value);
-  const year = String(date.getFullYear()).slice(-2);
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-
-  return `${year}/${month}/${day} ${hour}:${minute}`;
-}
-
-function formatDateOnly(value?: string) {
-  if (!value) {
-    return "-";
-  }
-
-  const date = new Date(value);
-  const year = String(date.getFullYear()).slice(-2);
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-
-  return `${year}/${month}/${day}`;
-}
-
-function formatSupervisionRole(role: ChatMessage["role"]) {
-  if (role === "supervisor") {
-    return "督导师";
-  }
-  if (role === "assistant") {
-    return "咨询师";
-  }
-  if (role === "user") {
-    return "来访者";
-  }
-  return "系统";
-}
-
-function cleanMarkdownText(value: string) {
-  return value
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .replace(/__([^_]+)__/g, "$1")
-    .replace(/_([^_]+)_/g, "$1")
-    .replace(/^#{1,6}\s*/gm, "")
-    .replace(/^>\s*/gm, "")
-    .replace(/^[-*+]\s*/gm, "")
-    .replace(/^\d+\.\s*/gm, "")
-    .replace(/\r/g, "")
-    .trim();
-}
-
-function parseSupervisionArticle(content: string) {
-  return cleanMarkdownText(content)
-    .split(/\n{2,}/)
-    .map((block) => block.split("\n").map((line) => line.trim()).filter(Boolean).join(" "))
-    .filter(Boolean)
-    .map((block) => {
-      const match = block.match(/^([^：:]{2,18})[：:]\s*(.+)$/);
-      if (!match) {
-        return { type: "paragraph" as const, content: block };
-      }
-      return {
-        type: "labeled" as const,
-        label: match[1].trim(),
-        content: match[2].trim()
-      };
-    });
-}
-
-function getNextSessionTitle(sessions: SessionRecord[]) {
-  const highestIndex = sessions.reduce((max, session) => {
-    const match = session.title.match(/^第(\d+)次会谈$/);
-    if (!match) {
-      return max;
-    }
-    return Math.max(max, Number(match[1]));
-  }, 0);
-
-  return `第${highestIndex + 1}次会谈`;
-}
-
-function resolveSessionForSupervisionRun(
-  sessions: SessionRecord[],
-  run: Pick<SupervisionRun, "id" | "sessionId">
-) {
   return (
-    sessions.find((session) => session.id === run.sessionId) ??
-    sessions.find((session) => session.supervisionId === run.id) ??
-    null
+    <div className="journal-rich-text">
+      {blocks.map((block, index) => {
+        if (block.type === "heading") {
+          return (
+            <h4 className={`journal-heading journal-heading-${block.level}`} key={`heading-${index}`}>
+              {block.content}
+            </h4>
+          );
+        }
+
+        if (block.type === "list") {
+          const ListTag = block.ordered ? "ol" : "ul";
+          return (
+            <ListTag className="journal-list" key={`list-${index}`}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`item-${index}-${itemIndex}`}>{item}</li>
+              ))}
+            </ListTag>
+          );
+        }
+
+        return (
+          <p className="journal-paragraph" key={`paragraph-${index}`}>
+            {block.content}
+          </p>
+        );
+      })}
+    </div>
   );
-}
-
-function formatStreamingThinkingLine(thinking?: string) {
-  const normalized = thinking?.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return "咨询师思考中";
-  }
-  return normalized;
-}
-
-function isStreamNearBottom(element: HTMLDivElement) {
-  return element.scrollHeight - element.scrollTop - element.clientHeight < 96;
-}
-
-function parseSseChunk(chunk: string) {
-  const events = chunk
-    .split("\n\n")
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-  return events.flatMap((event) => {
-    const lines = event.split("\n");
-    const type = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
-    const data = lines
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trim())
-      .join("\n");
-
-    if (!type || !data) {
-      return [];
-    }
-
-    try {
-      return [{ type, payload: JSON.parse(data) as unknown }];
-    } catch {
-      return [];
-    }
-  });
 }
 
 function IconButton({
@@ -384,155 +259,276 @@ function PaceDialIcon() {
   );
 }
 
-export function AppDashboard({ user }: { user: User }) {
-  const router = useRouter();
-  const streamRef = useRef<HTMLDivElement | null>(null);
-  const shouldStickToBottomRef = useRef(true);
-  const lastStreamScrollTopRef = useRef(0);
-  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const composerRef = useRef<HTMLFormElement | null>(null);
-  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
-  const progressCardRef = useRef<HTMLDivElement | null>(null);
-  const sessionRequestRef = useRef(0);
-  const initialLoadRef = useRef(false);
-  const [sessions, setSessions] = useState<SessionRecord[]>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [activeSession, setActiveSession] = useState<SessionDetail | null>(null);
-  const [therapyJournal, setTherapyJournal] = useState("加载中...");
-  const [supervisionJournal, setSupervisionJournal] = useState("加载中...");
-  const [supervisionRuns, setSupervisionRuns] = useState<SupervisionRun[]>([]);
-  const [view, setView] = useState<ViewMode>("chat");
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [createPanelOpen, setCreatePanelOpen] = useState(false);
-  const [draftTitle, setDraftTitle] = useState("第1次会谈");
-  const [draftMode, setDraftMode] = useState<SessionMode>(DEFAULT_SESSION_MODE);
-  const [autoSupervision, setAutoSupervision] = useState(true);
-  const [messageInput, setMessageInput] = useState("");
-  const [isComposerComposing, setIsComposerComposing] = useState(false);
-  const [sessionToComplete, setSessionToComplete] = useState<SessionRecord | null>(null);
-  const [sessionToDelete, setSessionToDelete] = useState<SessionRecord | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
-  const [themePreference, setThemePreference] = useState<ThemePreference>("system");
-  const [portalReady, setPortalReady] = useState(false);
-  const [expandedThinkingIds, setExpandedThinkingIds] = useState<string[]>([]);
-  const [paceBusy, setPaceBusy] = useState(false);
-  const [pacePanelOpen, setPacePanelOpen] = useState(false);
-  const [mobileSessionBarCollapsed, setMobileSessionBarCollapsed] = useState(false);
-  const [selectedSupervisionRunId, setSelectedSupervisionRunId] = useState<string | null>(null);
+const ChatMessageBubble = memo(function ChatMessageBubble({
+  expandedThinking,
+  message,
+  onToggleThinking
+}: {
+  expandedThinking: boolean;
+  message: ChatMessage;
+  onToggleThinking: (messageId: string) => void;
+}) {
+  const bubbleClassName =
+    message.role === "user"
+      ? "bubble bubble-user"
+      : message.role === "assistant"
+        ? "bubble bubble-ai"
+        : "bubble bubble-support";
+  const rowClassName =
+    message.role === "user"
+      ? "message-row message-row-user"
+      : message.role === "assistant"
+        ? "message-row message-row-ai"
+        : "message-row message-row-support";
 
-  const activeSessionMeta =
-    sessions.find((session) => session.id === selectedSessionId) ?? activeSession;
-  const headerSession = activeSessionMeta ?? activeSession;
-  const headerSessionIsActive = headerSession?.status === "active";
-  const completedSessions = sessions.filter((session) => session.status === "completed");
-  const supervisionSessionMap = new Map(sessions.map((session) => [session.id, session]));
-  const selectedSupervisionRun =
-    supervisionRuns.find((run) => run.id === selectedSupervisionRunId) ?? null;
-  const selectedSupervisionSession = selectedSupervisionRun
-    ? resolveSessionForSupervisionRun(sessions, selectedSupervisionRun)
-    : null;
-  const completedCount = completedSessions.length;
-  const lastMessage = activeSession?.messages.at(-1);
-  const activeSessionId = activeSession?.id;
-  const activeSessionPace = normalizeSessionPace(activeSession?.pace ?? DEFAULT_SESSION_PACE);
-  const activeSessionPaceMeta = getSessionPaceMeta(activeSessionPace);
-  const activeSessionProgress = activeSession ? estimateSessionProgress(activeSession) : null;
-  const progressCard = activeSessionProgress ? (
-    <div
-      aria-label={`会谈进度 ${activeSessionProgress.percent}%`}
-      className="session-progress-card"
-    >
+  return (
+    <div className={rowClassName}>
+      <article className={`${bubbleClassName}${message.animateIn ? " bubble-enter" : ""}`}>
+        {message.role === "assistant" && message.isStreaming && !message.streamingDone ? (
+          <>
+            <div className="bubble-head bubble-head-time-only">
+              <time>{formatDateTime(message.createdAt)}</time>
+            </div>
+            <div className="thinking-panel">
+              <div className="bubble-thinking bubble-thinking-live" aria-label="咨询师思考中">
+                <div className="thinking-dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="thinking-inline-viewport">
+                  <span className="thinking-inline" aria-live="polite">
+                    {formatStreamingThinkingLine(message.thinking)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            {message.content ? <p>{message.content}</p> : null}
+          </>
+        ) : message.content ? (
+          <>
+            <div className="bubble-head bubble-head-time-only">
+              <time>{formatDateTime(message.createdAt)}</time>
+            </div>
+            {message.role === "assistant" && message.rawThinking ? (
+              <div className="thinking-panel">
+                <button
+                  aria-expanded={expandedThinking}
+                  className="bubble-thinking bubble-thinking-history thinking-toggle"
+                  onClick={() => onToggleThinking(message.id)}
+                  type="button"
+                >
+                  <div className="thinking-copy">
+                    <p className="thinking-label">查看咨询师思考记录</p>
+                  </div>
+                  <span
+                    aria-hidden="true"
+                    className={`thinking-chevron${expandedThinking ? " is-open" : ""}`}
+                  >
+                    <ChevronDownIcon />
+                  </span>
+                </button>
+                {expandedThinking ? (
+                  <div className="thinking-transcript" aria-label="完整思考记录">
+                    {message.rawThinking
+                      .trim()
+                      .split(/\n{2,}/)
+                      .map((paragraph, index) => (
+                        <p key={`${message.id}-thinking-${index}`}>
+                          {paragraph.trim()}
+                        </p>
+                      ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            <p>{message.content}</p>
+          </>
+        ) : (
+          <div className="bubble-thinking" aria-label="咨询师思考中">
+            <div className="thinking-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="thinking-inline-viewport">
+              <span className="thinking-inline">咨询师思考中</span>
+            </div>
+          </div>
+        )}
+      </article>
+    </div>
+  );
+});
+
+const MessageStreamView = memo(function MessageStreamView({
+  expandedThinkingIds,
+  messages,
+  onScroll,
+  onToggleThinking,
+  streamRef
+}: {
+  expandedThinkingIds: string[];
+  messages: ChatMessage[];
+  onScroll: (event: UIEvent<HTMLDivElement>) => void;
+  onToggleThinking: (messageId: string) => void;
+  streamRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div className="message-stream" ref={streamRef} onScroll={onScroll}>
+      {messages.map((message) => (
+        <ChatMessageBubble
+          expandedThinking={expandedThinkingIds.includes(message.id)}
+          key={message.id}
+          message={message}
+          onToggleThinking={onToggleThinking}
+        />
+      ))}
+    </div>
+  );
+});
+
+function SessionProgressCard({ progress }: { progress: SessionProgress }) {
+  return (
+    <div aria-label={`会谈进度 ${progress.percent}%`} className="session-progress-card">
       <div
         className={`session-progress-meta${
-          activeSessionProgress.phase === "completed" ? " is-completed" : ""
+          progress.phase === "completed" ? " is-completed" : ""
         }`}
       >
-        {activeSessionProgress.phase === "completed" ? (
+        {progress.phase === "completed" ? (
           <>
-            <strong>{activeSessionProgress.phaseLabel}</strong>
-            <p>{activeSessionProgress.summary}</p>
+            <strong>{progress.phaseLabel}</strong>
+            <p>{progress.summary}</p>
           </>
         ) : (
           <div>
-            <strong>{activeSessionProgress.phaseLabel}</strong>
-            <p>{activeSessionProgress.summary}</p>
+            <strong>{progress.phaseLabel}</strong>
+            <p>{progress.summary}</p>
           </div>
         )}
       </div>
       <div
         aria-valuemax={100}
         aria-valuemin={0}
-        aria-valuenow={activeSessionProgress.percent}
+        aria-valuenow={progress.percent}
         className="session-progress-track"
         role="progressbar"
       >
-        <span
-          className="session-progress-fill"
-          style={{ width: `${activeSessionProgress.percent}%` }}
-        />
+        <span className="session-progress-fill" style={{ width: `${progress.percent}%` }} />
       </div>
       <div className="session-progress-foot">
-        <span className="session-progress-detail">{activeSessionProgress.detailLabel}</span>
-        <span className="session-progress-percent">{activeSessionProgress.percent}%</span>
+        <span className="session-progress-detail">{progress.detailLabel}</span>
+        <span className="session-progress-percent">{progress.percent}%</span>
       </div>
     </div>
+  );
+}
+
+export function AppDashboard({ user }: { user: User }) {
+  const router = useRouter();
+  const [draftTitle, setDraftTitle] = useState("第1次会谈");
+  const [draftMode, setDraftMode] = useState<SessionMode>(DEFAULT_SESSION_MODE);
+  const [autoSupervision, setAutoSupervision] = useState(true);
+  const [messageInput, setMessageInput] = useState("");
+  const [isComposerComposing, setIsComposerComposing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [activeSessionReminderOpen, setActiveSessionReminderOpen] = useState(false);
+  const {
+    sessions,
+    setSessions,
+    selectedSessionId,
+    setSelectedSessionId,
+    activeSession,
+    setActiveSession,
+    therapyJournal,
+    supervisionJournal,
+    supervisionRuns,
+    loadSessionDetail,
+    loadSessions,
+    loadJournals
+  } = useDashboardData({ setNotice });
+  const {
+    view,
+    setView,
+    sidebarOpen,
+    setSidebarOpen,
+    createPanelOpen,
+    setCreatePanelOpen,
+    sessionToComplete,
+    setSessionToComplete,
+    sessionToDelete,
+    setSessionToDelete,
+    portalReady,
+    pacePanelOpen,
+    setPacePanelOpen,
+    mobileSessionBarCollapsed,
+    setMobileSessionBarCollapsed,
+    selectedSupervisionRunId,
+    setSelectedSupervisionRunId,
+    handleViewChange,
+    moveCompleteModalToDeleteFlow: moveCompleteModalToDeleteFlowState
+  } = useDashboardUiState(supervisionRuns);
+  const { themePreference, cycleThemePreference, getThemeButtonLabel } =
+    useAppTheme(THEME_STORAGE_KEY);
+  const {
+    headerSession,
+    headerSessionIsActive,
+    activeSessions,
+    completedSessions,
+    historySessions,
+    supervisionSessionMap,
+    activeCount,
+    completedCount,
+    selectedSupervisionRun,
+    selectedSupervisionSession,
+    lastMessageIsStreaming,
+    activeSessionId,
+    activeSessionPace,
+    activeSessionPaceMeta,
+    activeSessionProgress,
+    sessionToCompleteProgress,
+    sessionToCompleteNeedsMoreConversation
+  } = getDashboardDerivedState({
+    sessions,
+    selectedSessionId,
+    activeSession,
+    supervisionRuns,
+    selectedSupervisionRunId,
+    sessionToComplete
+  });
+  const progressCard = activeSessionProgress ? (
+    <SessionProgressCard progress={activeSessionProgress} />
   ) : null;
-
-  const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
-    const stream = streamRef.current;
-    if (!stream) {
-      return;
-    }
-
-    stream.scrollTo({
-      top: stream.scrollHeight,
-      behavior
-    });
-  }, []);
-
-  const syncComposerMetrics = useCallback(() => {
-    const root = document.documentElement;
-    const composerHeight =
-      composerOverlayRef.current?.offsetHeight ?? composerRef.current?.offsetHeight ?? 0;
-    root.style.setProperty("--composer-height", `${composerHeight}px`);
-  }, []);
-
-  const syncViewportMetrics = useCallback(() => {
-    const root = document.documentElement;
-    const viewport = window.visualViewport;
-    const viewportHeight = viewport?.height ?? window.innerHeight;
-    const keyboardInset = viewport
-      ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
-      : 0;
-
-    root.style.setProperty("--visual-viewport-height", `${viewportHeight}px`);
-    root.style.setProperty("--keyboard-inset", `${keyboardInset}px`);
-    syncComposerMetrics();
-  }, [syncComposerMetrics]);
-
-  const revealComposer = useCallback((behavior: ScrollBehavior = "smooth") => {
-    const composer = composerRef.current;
-    if (!composer) {
-      return;
-    }
-
-    composer.scrollIntoView({
-      block: "end",
-      inline: "nearest",
-      behavior
-    });
-
-    window.requestAnimationFrame(() => {
-      scrollChatToBottom(behavior === "auto" ? "auto" : "smooth");
-    });
-  }, [scrollChatToBottom]);
-
-  const syncProgressMetrics = useCallback(() => {
-    const root = document.documentElement;
-    const progressHeight = progressCardRef.current?.offsetHeight ?? 0;
-    root.style.setProperty("--session-progress-height", `${progressHeight}px`);
-  }, []);
+  const {
+    streamRef,
+    composerTextareaRef,
+    composerRef,
+    composerOverlayRef,
+    progressCardRef,
+    expandedThinkingIds,
+    handleStreamScroll,
+    toggleThinkingExpanded,
+    ensureThinkingExpanded,
+    flushAssistantStreamUpdate,
+    scheduleAssistantStreamUpdate,
+    handleComposerFocus,
+    markShouldStickToBottom
+  } = useDashboardChatUi({
+    activeSessionId,
+    activeSessionStatus: activeSession?.status,
+    activeSessionProgressPercent: activeSessionProgress?.percent,
+    busy,
+    lastMessageContent: activeSession?.messages.at(-1)?.content,
+    lastMessageThinking: activeSession?.messages.at(-1)?.thinking,
+    lastMessageIsStreaming,
+    messageInput,
+    setActiveSession,
+    setMobileSessionBarCollapsed,
+    setPacePanelOpen,
+    view
+  });
 
   useEffect(() => {
     if (!createPanelOpen) {
@@ -541,653 +537,55 @@ export function AppDashboard({ user }: { user: User }) {
   }, [createPanelOpen, sessions]);
 
   useEffect(() => {
-    setPortalReady(true);
-  }, []);
-
-  useEffect(() => {
-    const textarea = composerTextareaRef.current;
-    if (!textarea) {
-      return;
+    if (notice === ACTIVE_SESSION_EXISTS_MESSAGE) {
+      setActiveSessionReminderOpen(true);
+      setNotice("");
     }
-
-    textarea.style.height = "auto";
-    const computed = window.getComputedStyle(textarea);
-    const lineHeight = Number.parseFloat(computed.lineHeight) || 24;
-    const maxLines = Number.parseFloat(computed.getPropertyValue("--composer-max-lines")) || 4;
-    const maxHeight =
-      lineHeight * maxLines +
-      Number.parseFloat(computed.paddingTop || "0") +
-      Number.parseFloat(computed.paddingBottom || "0");
-    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
-
-    textarea.style.height = `${Math.max(nextHeight, lineHeight)}px`;
-    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
-    syncComposerMetrics();
-  }, [messageInput, activeSessionId, syncComposerMetrics]);
-
-  useEffect(() => {
-    syncComposerMetrics();
-  }, [activeSession?.status, busy, syncComposerMetrics]);
-
-  useEffect(() => {
-    const composer = composerOverlayRef.current ?? composerRef.current;
-    if (!composer || typeof ResizeObserver === "undefined") {
-      return;
-    }
-
-    const observer = new ResizeObserver(() => {
-      syncComposerMetrics();
-    });
-
-    observer.observe(composer);
-    return () => observer.disconnect();
-  }, [syncComposerMetrics]);
-
-  useEffect(() => {
-    syncProgressMetrics();
-  }, [activeSessionId, activeSessionProgress?.percent, syncProgressMetrics]);
-
-  useEffect(() => {
-    if (activeSessionProgress) {
-      return;
-    }
-
-    document.documentElement.style.setProperty("--session-progress-height", "0px");
-  }, [activeSessionProgress]);
-
-  useEffect(() => {
-    const progressCardNode = progressCardRef.current;
-    if (!progressCardNode || typeof ResizeObserver === "undefined") {
-      return;
-    }
-
-    const observer = new ResizeObserver(() => {
-      syncProgressMetrics();
-    });
-
-    observer.observe(progressCardNode);
-    return () => observer.disconnect();
-  }, [activeSessionId, activeSessionProgress?.percent, syncProgressMetrics]);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    const storedPreference = root.dataset.themePreference;
-
-    if (
-      storedPreference === "light" ||
-      storedPreference === "dark" ||
-      storedPreference === "system"
-    ) {
-      setThemePreference(storedPreference);
-      return;
-    }
-
-    try {
-      const savedPreference = window.localStorage.getItem(THEME_STORAGE_KEY);
-      if (
-        savedPreference === "light" ||
-        savedPreference === "dark" ||
-        savedPreference === "system"
-      ) {
-        setThemePreference(savedPreference);
-      }
-    } catch {
-      // Ignore storage failures and keep system mode.
-    }
-  }, []);
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-
-    function applyTheme(preference: ThemePreference) {
-      const resolvedTheme =
-        preference === "system" ? (mediaQuery.matches ? "dark" : "light") : preference;
-
-      document.documentElement.dataset.theme = resolvedTheme;
-      document.documentElement.dataset.themePreference = preference;
-      document.documentElement.style.colorScheme = resolvedTheme;
-
-      try {
-        window.localStorage.setItem(THEME_STORAGE_KEY, preference);
-      } catch {
-        // Ignore storage failures and still apply the in-memory preference.
-      }
-    }
-
-    applyTheme(themePreference);
-
-    const handleChange = () => {
-      if (themePreference === "system") {
-        applyTheme("system");
-      }
-    };
-
-    mediaQuery.addEventListener("change", handleChange);
-    return () => mediaQuery.removeEventListener("change", handleChange);
-  }, [themePreference]);
-
-  useEffect(() => {
-    if (!pacePanelOpen) {
-      return;
-    }
-
-    function handleWindowPointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (!(target instanceof HTMLElement) || target.closest("[data-pace-control-root]")) {
-        return;
-      }
-
-      setPacePanelOpen(false);
-    }
-
-    window.addEventListener("pointerdown", handleWindowPointerDown);
-    return () => window.removeEventListener("pointerdown", handleWindowPointerDown);
-  }, [pacePanelOpen]);
-
-  const loadSessionDetail = useCallback(async (sessionId: string) => {
-    const requestId = sessionRequestRef.current + 1;
-    sessionRequestRef.current = requestId;
-
-    const response = await fetch(`/api/sessions/${sessionId}`);
-    if (!response.ok) {
-      setNotice("会谈内容加载失败");
-      return;
-    }
-
-    const payload = (await response.json()) as { session: SessionDetail };
-    if (sessionRequestRef.current !== requestId) {
-      return;
-    }
-
-    setSelectedSessionId(payload.session.id);
-    setActiveSession(payload.session);
-  }, []);
-
-  const loadSessions = useCallback(async (selectedId?: string) => {
-    const response = await fetch("/api/sessions");
-    if (!response.ok) {
-      setNotice("会谈列表加载失败");
-      return;
-    }
-
-    const payload = (await response.json()) as { sessions: SessionRecord[] };
-    setSessions(payload.sessions);
-
-    const requestedId = selectedId ?? selectedSessionId;
-    const nextId = payload.sessions.some((session) => session.id === requestedId)
-      ? requestedId
-      : payload.sessions[0]?.id;
-
-    if (nextId) {
-      await loadSessionDetail(nextId);
-    } else {
-      setSelectedSessionId(null);
-      setActiveSession(null);
-    }
-  }, [loadSessionDetail, selectedSessionId]);
-
-  const loadJournals = useCallback(async () => {
-    const [therapyResponse, supervisionResponse] = await Promise.all([
-      fetch("/api/journal/therapy"),
-      fetch("/api/journal/supervision")
-    ]);
-
-    if (therapyResponse.ok) {
-      const payload = (await therapyResponse.json()) as { content: string };
-      setTherapyJournal(payload.content);
-    } else {
-      setTherapyJournal("暂无咨询师手帐。");
-    }
-
-    if (supervisionResponse.ok) {
-      const payload = (await supervisionResponse.json()) as {
-        content: string;
-        runs: SupervisionRun[];
-      };
-      setSupervisionJournal(payload.content);
-      setSupervisionRuns(payload.runs);
-    } else {
-      setSupervisionJournal("暂无督导手帐。");
-      setSupervisionRuns([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (initialLoadRef.current) {
-      return;
-    }
-
-    initialLoadRef.current = true;
-    void loadSessions();
-    void loadJournals();
-  }, [loadJournals, loadSessions]);
-
-  useEffect(() => {
-    if (
-      selectedSupervisionRunId &&
-      !supervisionRuns.some((run) => run.id === selectedSupervisionRunId)
-    ) {
-      setSelectedSupervisionRunId(null);
-    }
-  }, [selectedSupervisionRunId, supervisionRuns]);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    const viewport = window.visualViewport;
-    const syncViewportInset = () => {
-      syncViewportMetrics();
-
-      if (
-        document.activeElement === composerTextareaRef.current &&
-        view === "chat"
-      ) {
-        shouldStickToBottomRef.current = true;
-        revealComposer("auto");
-      }
-    };
-
-    syncViewportInset();
-    window.addEventListener("resize", syncViewportInset);
-    viewport?.addEventListener("resize", syncViewportInset);
-    viewport?.addEventListener("scroll", syncViewportInset);
-
-    return () => {
-      window.removeEventListener("resize", syncViewportInset);
-      viewport?.removeEventListener("resize", syncViewportInset);
-      viewport?.removeEventListener("scroll", syncViewportInset);
-      root.style.setProperty("--keyboard-inset", "0px");
-      root.style.setProperty("--visual-viewport-height", "100dvh");
-    };
-  }, [revealComposer, syncViewportMetrics, view]);
-
-  useEffect(() => {
-    const stream = streamRef.current;
-    if (!stream || view !== "chat" || !shouldStickToBottomRef.current) {
-      return;
-    }
-
-    scrollChatToBottom("smooth");
-  }, [activeSession?.messages.length, lastMessage?.content, lastMessage?.thinking, scrollChatToBottom, view]);
-
-  useEffect(() => {
-    if (view !== "chat") {
-      return;
-    }
-
-    shouldStickToBottomRef.current = true;
-    lastStreamScrollTopRef.current = 0;
-    setMobileSessionBarCollapsed(false);
-  }, [activeSessionId, view]);
-
-  useEffect(() => {
-    if (document.activeElement !== composerTextareaRef.current || view !== "chat") {
-      return;
-    }
-
-    shouldStickToBottomRef.current = true;
-    scrollChatToBottom("auto");
-  }, [messageInput, scrollChatToBottom, view]);
-
-  const handleStreamScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    const stream = event.currentTarget;
-    const scrollTop = stream.scrollTop;
-    const previousScrollTop = lastStreamScrollTopRef.current;
-
-    shouldStickToBottomRef.current = isStreamNearBottom(stream);
-
-    if (window.innerWidth <= 780) {
-      const scrollingDown = scrollTop > previousScrollTop + 6;
-      const nearTop = scrollTop < 24;
-
-      if (nearTop) {
-        setMobileSessionBarCollapsed(false);
-      } else if (scrollingDown && scrollTop > 72) {
-        setMobileSessionBarCollapsed(true);
-        setPacePanelOpen(false);
-      }
-    }
-
-    lastStreamScrollTopRef.current = scrollTop;
-  }, []);
-
-  const toggleThinkingExpanded = useCallback((messageId: string) => {
-    setExpandedThinkingIds((current) =>
-      current.includes(messageId)
-        ? current.filter((id) => id !== messageId)
-        : [...current, messageId]
-    );
-  }, []);
-
-  async function createNewSession() {
-    setBusy(true);
-    setNotice("");
-
-    try {
-      const response = await fetch("/api/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: draftTitle,
-          mode: draftMode,
-          autoSupervision
-        })
-      });
-
-      const payload = (await response.json()) as { error?: string; session?: SessionRecord };
-      if (!response.ok || !payload.session) {
-        setNotice(payload.error ?? "创建失败");
-        return;
-      }
-
-      setView("chat");
-      setSidebarOpen(false);
-      setCreatePanelOpen(false);
-      await loadSessions(payload.session.id);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function updateSessionPaceValue(nextPace: SessionPace) {
-    if (!activeSession || paceBusy || normalizeSessionPace(activeSession.pace) === nextPace) {
-      return;
-    }
-
-    const previousPace = normalizeSessionPace(activeSession.pace);
-
-    setPaceBusy(true);
-    setNotice("");
-    setActiveSession((current) => (current ? { ...current, pace: nextPace } : current));
-    setSessions((current) =>
-      current.map((session) =>
-        session.id === activeSession.id ? { ...session, pace: nextPace } : session
-      )
-    );
-
-    try {
-      const response = await fetch(`/api/sessions/${activeSession.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pace: nextPace })
-      });
-      const payload = (await response.json()) as { error?: string; session?: SessionDetail };
-
-      if (!response.ok || !payload.session) {
-        setActiveSession((current) => (current ? { ...current, pace: previousPace } : current));
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === activeSession.id ? { ...session, pace: previousPace } : session
-          )
-        );
-        setNotice(payload.error ?? "速度更新失败");
-        return;
-      }
-
-      setActiveSession(payload.session);
-      setSessions((current) =>
-        current.map((session) =>
-          session.id === payload.session?.id
-            ? {
-                ...session,
-                pace: payload.session.pace,
-                updatedAt: payload.session.updatedAt,
-                messageCount: payload.session.messageCount,
-                riskLevel: payload.session.riskLevel,
-                redactedSummary: payload.session.redactedSummary
-              }
-            : session
-        )
-      );
-    } finally {
-      setPaceBusy(false);
-    }
-  }
-
-  async function sendMessage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!activeSession || busy) {
-      return;
-    }
-
-    const content = messageInput.trim();
-    if (!content) {
-      return;
-    }
-
-    const temporaryUserMessage: ChatMessage = {
-      id: `temp-user-${Date.now()}`,
-      role: "user",
-      content,
-      createdAt: new Date().toISOString()
-    };
-    const temporaryAssistantMessage: ChatMessage = {
-      id: `temp-assistant-${Date.now()}`,
-      role: "assistant",
-      content: "",
-      createdAt: new Date().toISOString(),
-      thinking: "",
-      isStreaming: true,
-      animateIn: true
-    };
-    const pendingUserMessage: ChatMessage = {
-      ...temporaryUserMessage,
-      animateIn: true
-    };
-
-    setBusy(true);
-    setNotice("");
-    setMessageInput("");
-    shouldStickToBottomRef.current = true;
-    setActiveSession((current) =>
-      current
-        ? {
-            ...current,
-            messages: [...current.messages, pendingUserMessage, temporaryAssistantMessage],
-            messageCount: current.messageCount + 2,
-            updatedAt: temporaryAssistantMessage.createdAt
-          }
-        : current
-    );
-
-    try {
-      const response = await fetch(`/api/sessions/${activeSession.id}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-page-language":
-            document.documentElement.lang || navigator.language || "zh-CN"
-        },
-        body: JSON.stringify({ content })
-      });
-
-      if (!response.ok || !response.body) {
-        const payload = (await response.json()) as {
-          error?: string;
-          userMessage?: ChatMessage;
-          assistantMessage?: ChatMessage;
-        };
-        setMessageInput(content);
-        setActiveSession((current) =>
-          current
-            ? {
-                ...current,
-                messages: current.messages.filter(
-                  (message) =>
-                    message.id !== temporaryUserMessage.id && message.id !== temporaryAssistantMessage.id
-                ),
-                messageCount: Math.max(current.messageCount - 2, 0)
-              }
-            : current
-        );
-        setNotice(payload.error ?? "发送失败");
-        return;
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let finalUserMessage: ChatMessage | undefined;
-      let finalAssistantMessage: ChatMessage | undefined;
-      let streamFailed = false;
-      let streamError = "发送失败";
-
-      function applyStreamEvent(eventItem: { type: string; payload: unknown }) {
-        if (eventItem.type === "thinking") {
-          const payload = eventItem.payload as { summary?: string };
-          setActiveSession((current) =>
-            current
-              ? {
-                  ...current,
-                  messages: current.messages.map((message) =>
-                    message.id === temporaryAssistantMessage.id
-                      ? {
-                          ...message,
-                          thinking: payload.summary ?? message.thinking ?? ""
-                        }
-                      : message
-                  )
-                }
-              : current
-          );
-          setExpandedThinkingIds((current) =>
-            current.includes(temporaryAssistantMessage.id)
-              ? current
-              : [...current, temporaryAssistantMessage.id]
-          );
-          return;
-        }
-
-        if (eventItem.type === "reply") {
-          const payload = eventItem.payload as { content?: string };
-          setActiveSession((current) =>
-            current
-              ? {
-                  ...current,
-                  messages: current.messages.map((message) =>
-                    message.id === temporaryAssistantMessage.id
-                      ? {
-                          ...message,
-                          content: payload.content ?? message.content,
-                          thinking: message.thinking ?? ""
-                        }
-                      : message
-                  )
-                }
-              : current
-          );
-          return;
-        }
-
-        if (eventItem.type === "done") {
-          const payload = eventItem.payload as {
-            userMessage?: ChatMessage;
-            assistantMessage?: ChatMessage;
-          };
-          finalUserMessage = payload.userMessage;
-          finalAssistantMessage = payload.assistantMessage;
-          return;
-        }
-
-        if (eventItem.type === "error") {
-          const payload = eventItem.payload as { error?: string };
-          streamFailed = true;
-          streamError = payload.error ?? "发送失败";
-        }
-      }
-
-      while (true) {
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value, { stream: !done });
-
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-
-        for (const item of parts) {
-          for (const eventItem of parseSseChunk(item)) {
-            applyStreamEvent(eventItem);
-          }
-        }
-
-        if (done) {
-          if (buffer.trim()) {
-            for (const eventItem of parseSseChunk(buffer)) {
-              applyStreamEvent(eventItem);
-            }
-          }
-          break;
-        }
-      }
-
-      if (streamFailed || !finalUserMessage || !finalAssistantMessage) {
-        setMessageInput(content);
-        setActiveSession((current) =>
-          current
-            ? {
-                ...current,
-                messages: current.messages.filter(
-                  (message) =>
-                    message.id !== temporaryUserMessage.id && message.id !== temporaryAssistantMessage.id
-                ),
-                messageCount: Math.max(current.messageCount - 2, 0)
-              }
-            : current
-        );
-        setNotice(streamError);
-        return;
-      }
-
-      const userMessage = finalUserMessage;
-      const assistantMessage = finalAssistantMessage;
-      setActiveSession((current) =>
-        current
-          ? {
-              ...current,
-              messages: current.messages.map((message) => {
-                if (message.id === temporaryUserMessage.id) {
-                  return { ...userMessage, animateIn: message.animateIn };
-                }
-                if (message.id === temporaryAssistantMessage.id) {
-                  return {
-                    ...assistantMessage,
-                    animateIn: message.animateIn,
-                    content: assistantMessage.content || message.content,
-                    thinking: assistantMessage.thinking ?? message.thinking,
-                    rawThinking: assistantMessage.rawThinking,
-                    isStreaming: false,
-                    streamingDone: false
-                  };
-                }
-                return message;
-              }),
-              updatedAt: assistantMessage.createdAt
-            }
-          : current
-      );
-      const sessionsResponse = await fetch("/api/sessions");
-      if (sessionsResponse.ok) {
-        const payload = (await sessionsResponse.json()) as { sessions: SessionRecord[] };
-        setSessions(payload.sessions);
-      }
-    } catch {
-      setMessageInput(content);
-      setActiveSession((current) =>
-        current
-          ? {
-              ...current,
-              messages: current.messages.filter(
-                (message) =>
-                  message.id !== temporaryUserMessage.id && message.id !== temporaryAssistantMessage.id
-              ),
-              messageCount: Math.max(current.messageCount - 2, 0)
-            }
-          : current
-      );
-      setNotice("发送失败");
-    } finally {
-      setBusy(false);
-    }
-  }
+  }, [notice]);
+
+  const {
+    paceBusy,
+    updateSessionPaceValue,
+    createNewSession,
+    sendMessage,
+    completeCurrentSession,
+    rerunSupervision,
+    openSession,
+    openSessionForSupervisionRun,
+    deleteSession,
+    logout
+  } = useSessionActions({
+    router,
+    sessions,
+    selectedSessionId,
+    activeSession,
+    supervisionRuns,
+    busy,
+    setBusy,
+    setNotice,
+    setSessions,
+    setSelectedSessionId,
+    setActiveSession,
+    setView,
+    setSidebarOpen,
+    setCreatePanelOpen,
+    setSessionToComplete,
+    sessionToComplete,
+    setSessionToDelete,
+    sessionToDelete,
+    draftTitle,
+    draftMode,
+    autoSupervision,
+    messageInput,
+    setMessageInput,
+    scheduleAssistantStreamUpdate,
+    ensureThinkingExpanded,
+    flushAssistantStreamUpdate,
+    markShouldStickToBottom,
+    loadSessionDetail,
+    loadSessions,
+    loadJournals
+  });
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     const nativeEvent = event.nativeEvent;
@@ -1204,204 +602,12 @@ export function AppDashboard({ user }: { user: User }) {
     event.currentTarget.form?.requestSubmit();
   }
 
-  function handleComposerFocus() {
-    shouldStickToBottomRef.current = true;
-    syncViewportMetrics();
-    revealComposer("auto");
-    window.setTimeout(() => {
-      syncViewportMetrics();
-      revealComposer("auto");
-    }, 220);
-  }
-
-  async function completeCurrentSession() {
-    if (!sessionToComplete || busy) {
-      return;
-    }
-
-    const targetSession = sessionToComplete;
-    setBusy(true);
-    setNotice("");
-
-    try {
-      const response = await fetch(`/api/sessions/${targetSession.id}/complete`, {
-        method: "POST"
-      });
-      const raw = await response.text();
-      const payload = raw
-        ? (JSON.parse(raw) as {
-            error?: string;
-            supervisionCreated?: boolean;
-            supervisionFailed?: boolean;
-            alreadyCompleted?: boolean;
-          })
-        : {};
-
-      if (!response.ok) {
-        if (payload.error === "SESSION_COMPLETING") {
-          setNotice("这段会谈正在收尾处理中，请稍等片刻后刷新查看状态。");
-        } else if (payload.error === "NOT_FOUND") {
-          setNotice("这段会谈不存在，可能已经被删除。");
-        } else {
-          setNotice(payload.error ?? "结束失败");
-        }
-        return;
-      }
-
-      setSessionToComplete(null);
-      if (payload.alreadyCompleted) {
-        setNotice("本次会谈已处于结束状态。");
-      } else {
-        setNotice(
-          payload.supervisionCreated
-            ? "本次会谈已结束，并已自动生成督导记录。"
-            : payload.supervisionFailed
-              ? "本次会谈已结束，但自动督导暂未生成成功。"
-              : "本次会谈已结束。"
-        );
-      }
-      await loadSessions(targetSession.id);
-      await loadJournals();
-    } catch {
-      setNotice("结束会谈时出现异常，请稍后重试。");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function rerunSupervision(session: SessionRecord) {
-    if (busy) {
-      return;
-    }
-
-    setBusy(true);
-    setNotice("");
-
-    try {
-      const response = await fetch(`/api/sessions/${session.id}/supervision`, {
-        method: "POST"
-      });
-      const raw = await response.text();
-      const payload = raw
-        ? (JSON.parse(raw) as {
-            error?: string;
-            supervisionCreated?: boolean;
-            alreadyCreated?: boolean;
-          })
-        : {};
-
-      if (!response.ok) {
-        if (payload.error === "SESSION_NOT_COMPLETED") {
-          setNotice("这段会谈尚未结束，暂时不能补做督导。");
-        } else if (payload.error === "NOT_FOUND") {
-          setNotice("这段会谈不存在，可能已经被删除。");
-        } else {
-          setNotice(payload.error ?? "手动督导失败");
-        }
-        return;
-      }
-
-      setNotice(
-        payload.alreadyCreated
-          ? "这段会谈已有督导记录。"
-          : payload.supervisionCreated
-            ? "已为这段归档补做督导。"
-            : "已发起手动督导。"
-      );
-      await loadSessions(session.id);
-      await loadJournals();
-    } catch {
-      setNotice("手动督导时出现异常，请稍后重试。");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   function moveCompleteModalToDeleteFlow() {
-    if (!sessionToComplete || busy) {
-      return;
-    }
-
-    setSessionToDelete(sessionToComplete);
-    setSessionToComplete(null);
+    moveCompleteModalToDeleteFlowState(busy);
   }
 
-  async function openSession(sessionId: string) {
-    setSelectedSessionId(sessionId);
-    setView("chat");
-    setSidebarOpen(false);
-    await loadSessionDetail(sessionId);
-  }
-
-  async function openSessionForSupervisionRun(run: SupervisionRun) {
-    const matchedSession = resolveSessionForSupervisionRun(sessions, run);
-    if (!matchedSession) {
-      setNotice("未找到与该督导记录对应的存档会谈");
-      return;
-    }
-
-    await openSession(matchedSession.id);
-  }
-
-  function handleViewChange(nextView: ViewMode) {
-    setView(nextView);
-    if (nextView !== "supervision") {
-      setSelectedSupervisionRunId(null);
-    }
-    setSidebarOpen(false);
-  }
-
-  async function deleteSession() {
-    if (!sessionToDelete || busy) {
-      return;
-    }
-
-    const targetSession = sessionToDelete;
-    const remainingSessions = sessions.filter((session) => session.id !== targetSession.id);
-    const fallbackSessionId =
-      selectedSessionId === targetSession.id
-        ? remainingSessions[0]?.id ?? null
-        : selectedSessionId;
-
-    setBusy(true);
-    setNotice("");
-
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(targetSession.id)}`, {
-        method: "DELETE"
-      });
-      const raw = await response.text();
-      const payload = raw ? (JSON.parse(raw) as { error?: string }) : {};
-
-      if (!response.ok) {
-        setNotice(payload.error ?? "删除失败");
-        return;
-      }
-
-      setSessionToDelete(null);
-      setSessions(remainingSessions);
-      setSelectedSessionId(fallbackSessionId);
-      if (!fallbackSessionId) {
-        setActiveSession(null);
-      }
-      setNotice("会谈已删除，对应记录与派生督导内容已同步清理。");
-      await loadSessions(fallbackSessionId ?? undefined);
-      await loadJournals();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function logout() {
-    setBusy(true);
-
-    try {
-      await fetch("/api/auth/logout", { method: "POST" });
-      router.push("/");
-      router.refresh();
-    } finally {
-      setBusy(false);
-    }
+  function handleCreateSessionStart() {
+    void createNewSession();
   }
 
   const sessionTabs: Array<{
@@ -1416,12 +622,6 @@ export function AppDashboard({ user }: { user: User }) {
     { key: "supervision", label: "督导", count: supervisionRuns.length, icon: <SparkIcon /> }
   ];
 
-  const nextThemePreference: Record<ThemePreference, ThemePreference> = {
-    system: "light",
-    light: "dark",
-    dark: "system"
-  };
-
   function renderThemeIcon() {
     if (themePreference === "light") {
       return <SunIcon />;
@@ -1430,16 +630,6 @@ export function AppDashboard({ user }: { user: User }) {
       return <MoonIcon />;
     }
     return <AutoThemeIcon />;
-  }
-
-  function getThemeButtonLabel() {
-    if (themePreference === "light") {
-      return "切换主题，当前为白天模式";
-    }
-    if (themePreference === "dark") {
-      return "切换主题，当前为黑夜模式";
-    }
-    return "切换主题，当前跟随系统";
   }
 
   const headerLeadingActions = (
@@ -1504,7 +694,7 @@ export function AppDashboard({ user }: { user: User }) {
           themePreference === "system" ? "A" : themePreference === "light" ? "日" : "夜"
         }
         label={getThemeButtonLabel()}
-        onClick={() => setThemePreference(nextThemePreference[themePreference])}
+        onClick={cycleThemePreference}
       >
         {renderThemeIcon()}
       </IconButton>
@@ -1541,11 +731,6 @@ export function AppDashboard({ user }: { user: User }) {
 
   return (
     <main className={view === "chat" ? "app-shell app-shell-chat-active" : "app-shell"}>
-      <div className="app-aurora app-aurora-left" />
-      <div className="app-aurora app-aurora-right" />
-      <div className="app-light-trail app-light-trail-left" />
-      <div className="app-light-trail app-light-trail-right" />
-      <div className="app-pulse-grid" />
       <div className="app-grid app-grid-immersive">
         <aside className={sidebarOpen ? "studio-rail studio-rail-overlay is-open" : "studio-rail studio-rail-overlay"}>
           <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
@@ -1613,13 +798,6 @@ export function AppDashboard({ user }: { user: User }) {
           ) : null}
 
           <div className={`view-stage view-stage-${view}`} key={view}>
-            <div className="view-stage-ornaments" aria-hidden="true">
-              <span className="view-orb view-orb-a" />
-              <span className="view-orb view-orb-b" />
-              <span className="view-orb view-orb-c" />
-              <span className="view-streak view-streak-a" />
-              <span className="view-streak view-streak-b" />
-            </div>
             {view === "chat" ? (
               <div className="chat-stage-toolbar" aria-label="聊天快捷操作">
                 {headerLeadingActions}
@@ -1637,108 +815,19 @@ export function AppDashboard({ user }: { user: User }) {
                           {progressCard}
                         </div>
                       ) : null}
-                      <div className="message-stream" ref={streamRef} onScroll={handleStreamScroll}>
-                        {activeSession.messages.map((message) => {
-                          const bubbleClassName =
-                            message.role === "user"
-                              ? "bubble bubble-user"
-                              : message.role === "assistant"
-                                ? "bubble bubble-ai"
-                                : "bubble bubble-support";
-                          const rowClassName =
-                            message.role === "user"
-                              ? "message-row message-row-user"
-                              : message.role === "assistant"
-                                ? "message-row message-row-ai"
-                                : "message-row message-row-support";
-
-                          return (
-                            <div className={rowClassName} key={message.id}>
-                              <article className={`${bubbleClassName}${message.animateIn ? " bubble-enter" : ""}`}>
-                                {message.role === "assistant" && message.isStreaming && !message.streamingDone ? (
-                                  <>
-                                    <div className="bubble-head bubble-head-time-only">
-                                      <time>{formatDateTime(message.createdAt)}</time>
-                                    </div>
-                                    <div className="thinking-panel">
-                                      <div className="bubble-thinking bubble-thinking-live" aria-label="咨询师思考中">
-                                        <div className="thinking-dots" aria-hidden="true">
-                                          <span />
-                                          <span />
-                                          <span />
-                                        </div>
-                                        <div className="thinking-inline-viewport">
-                                          <span className="thinking-inline" aria-live="polite">
-                                            {formatStreamingThinkingLine(message.thinking)}
-                                          </span>
-                                        </div>
-                                      </div>
-                                    </div>
-                                    {message.content ? <p>{message.content}</p> : null}
-                                  </>
-                                ) : message.content ? (
-                                  <>
-                                    <div className="bubble-head bubble-head-time-only">
-                                      <time>{formatDateTime(message.createdAt)}</time>
-                                    </div>
-                                    {message.role === "assistant" && message.rawThinking ? (
-                                      <div className="thinking-panel">
-                                        <button
-                                          aria-expanded={expandedThinkingIds.includes(message.id)}
-                                          className="bubble-thinking bubble-thinking-history thinking-toggle"
-                                          onClick={() => toggleThinkingExpanded(message.id)}
-                                          type="button"
-                                        >
-                                          <div className="thinking-copy">
-                                            <p className="thinking-label">查看咨询师思考记录</p>
-                                          </div>
-                                          <span
-                                            aria-hidden="true"
-                                            className={`thinking-chevron${
-                                              expandedThinkingIds.includes(message.id) ? " is-open" : ""
-                                            }`}
-                                          >
-                                            <ChevronDownIcon />
-                                          </span>
-                                        </button>
-                                        {expandedThinkingIds.includes(message.id) ? (
-                                          <div className="thinking-transcript" aria-label="完整思考记录">
-                                            {message.rawThinking
-                                              .trim()
-                                              .split(/\n{2,}/)
-                                              .map((paragraph, index) => (
-                                                <p key={`${message.id}-thinking-${index}`}>
-                                                  {paragraph.trim()}
-                                                </p>
-                                              ))}
-                                          </div>
-                                        ) : null}
-                                      </div>
-                                    ) : null}
-                                    <p>{message.content}</p>
-                                  </>
-                                ) : (
-                                  <div className="bubble-thinking" aria-label="咨询师思考中">
-                                    <div className="thinking-dots" aria-hidden="true">
-                                      <span />
-                                      <span />
-                                      <span />
-                                    </div>
-                                    <div className="thinking-inline-viewport">
-                                      <span className="thinking-inline">咨询师思考中</span>
-                                    </div>
-                                  </div>
-                                )}
-                              </article>
-                            </div>
-                          );
-                        })}
-                      </div>
+                      <MessageStreamView
+                        expandedThinkingIds={expandedThinkingIds}
+                        messages={activeSession.messages}
+                        onScroll={handleStreamScroll}
+                        onToggleThinking={toggleThinkingExpanded}
+                        streamRef={streamRef}
+                      />
                       {activeSession.status === "active" ? (
                         <div className="chat-stage-composer-overlay" ref={composerOverlayRef}>
                           <form className="composer composer-stage" onSubmit={sendMessage} ref={composerRef}>
                             <div className="composer-input-shell">
                               <textarea
+                                data-single-line={!messageInput.includes("\n") ? "true" : "false"}
                                 ref={composerTextareaRef}
                                 placeholder="说说你此刻最想被理解的一件事..."
                                 rows={1}
@@ -1790,14 +879,17 @@ export function AppDashboard({ user }: { user: User }) {
                   <h3>会谈归档</h3>
                   <p className="muted">让每一次开口，都通往更懂自己的下一步。</p>
                 </div>
-                <span className="privacy-badge">{completedCount} 段已完成</span>
+                <span className="privacy-badge">
+                  {activeCount > 0 ? `${activeCount} 段进行中 · ` : ""}
+                  {completedCount} 段已完成
+                </span>
               </div>
 
               <div className="table-list">
-                {completedSessions.length === 0 ? (
-                  <div className="empty-state">还没有归档内容。开始一次会谈后，这里会自动出现。</div>
+                {historySessions.length === 0 ? (
+                  <div className="empty-state">还没有会谈记录。开始一次会谈后，这里会自动出现。</div>
                 ) : (
-                  completedSessions.map((session) => (
+                  historySessions.map((session) => (
                     <div className="table-row table-row-button history-row" key={session.id}>
                       <button
                         className="table-row-main history-row-main"
@@ -1814,12 +906,14 @@ export function AppDashboard({ user }: { user: User }) {
                           ) : null}
                         </div>
                         <span className="history-row-cell history-row-mode">{normalizeSessionMode(session.mode)}</span>
-                        <span className="history-row-cell history-row-status">{session.status}</span>
+                        <span className="history-row-cell history-row-status">
+                          {formatSessionStatusLabel(session.status)}
+                        </span>
                         <span className="history-row-cell history-row-count">{session.messageCount} 条</span>
                         <span className="history-row-cell history-row-date">{formatDateOnly(session.updatedAt)}</span>
                       </button>
                       <div className="history-row-actions">
-                        {!session.supervisionId ? (
+                        {session.status === "completed" && !session.supervisionId ? (
                           <button
                             className="ghost-button history-row-supervision"
                             disabled={busy}
@@ -1853,7 +947,7 @@ export function AppDashboard({ user }: { user: User }) {
                       <p>把散落的感受与线索，整理成能回看的自己。</p>
                     </div>
                   </div>
-                  <pre>{therapyJournal}</pre>
+                  <JournalContent content={therapyJournal} />
                 </div>
 
                 <div className="journal-card">
@@ -1863,7 +957,7 @@ export function AppDashboard({ user }: { user: User }) {
                       <p>在更高一层的视角里，看见对话背后的方向。</p>
                     </div>
                   </div>
-                  <pre>{supervisionJournal}</pre>
+                  <JournalContent content={supervisionJournal} />
                 </div>
               </section>
             ) : null}
@@ -1874,7 +968,7 @@ export function AppDashboard({ user }: { user: User }) {
                 <article className="journal-card supervision-detail-card">
                   <div className="journal-header supervision-detail-header">
                     <div>
-                      <h3>{selectedSupervisionSession?.title ?? "督导记录"}</h3>
+                      <h3>{formatSupervisionTitle(selectedSupervisionSession?.title)}</h3>
                     </div>
                     <div className="supervision-detail-actions">
                       <button
@@ -1974,7 +1068,7 @@ export function AppDashboard({ user }: { user: User }) {
                             type="button"
                           >
                             <div className="history-row-summary">
-                              <strong>{matchedSession?.title ?? "督导记录"}</strong>
+                              <strong>{formatSupervisionTitle(matchedSession?.title)}</strong>
                               <p>{run.redactedSummary}</p>
                             </div>
                             <span className="history-row-cell history-row-mode">
@@ -2043,38 +1137,58 @@ export function AppDashboard({ user }: { user: User }) {
               <div className="modal-backdrop" onClick={() => setSessionToComplete(null)} />
               <div className="modal-card">
                 <span className="eyebrow">session close</span>
-                <h3 id="complete-session-title">确认结束这段会谈？</h3>
+                <h3 id="complete-session-title">
+                  {sessionToCompleteNeedsMoreConversation ? "这会儿结束，好像还有点早" : "确认结束这段会谈？"}
+                </h3>
                 <p>
-                  结束后将停止继续发送消息。
-                  {sessionToComplete.autoSupervision
-                    ? "系统会自动启动一次督导复盘，请确认这是你想要的结束时点。"
-                    : "当前这段会谈未开启自动督导。"}
+                  {sessionToCompleteNeedsMoreConversation
+                    ? `当前进度刚走到 ${sessionToCompleteProgress?.percent ?? 0}%，这段对话还在热身发力中。要不先回去再聊两句？它还没到适合体面谢幕的时候。`
+                    : `结束后将停止继续发送消息。${
+                        sessionToComplete.autoSupervision
+                          ? "系统会自动启动一次督导复盘，请确认这是你想要的结束时点。"
+                          : "当前这段会谈未开启自动督导。"
+                      }`}
                 </p>
                 <div className="modal-session-brief">
                   <strong>{sessionToComplete.title}</strong>
                   <span>{normalizeSessionMode(sessionToComplete.mode)}</span>
                   <span>{sessionToComplete.messageCount} 条消息</span>
                 </div>
-                <div className="modal-inline-alert">
-                  <div className="modal-inline-alert-copy">
-                    <strong>如果这段会谈不需要保留</strong>
-                    <p>可以直接删除。删除会清理消息、关联督导记录与派生手帐，且无法恢复。</p>
+                {sessionToCompleteNeedsMoreConversation ? (
+                  <div className="modal-inline-alert">
+                    <div className="modal-inline-alert-copy">
+                      <strong>小提醒</strong>
+                      <p>如果只是手滑点到结束，返回对话就好；如果这段会谈确定不留了，再用删除按钮把它轻轻送走。</p>
+                    </div>
                   </div>
-                  <IconButton
-                    className="ghost-button danger-button modal-inline-delete-button"
-                    label="删除这段会谈"
-                    onClick={moveCompleteModalToDeleteFlow}
-                  >
-                    <TrashIcon />
-                  </IconButton>
-                </div>
+                ) : (
+                  <div className="modal-inline-alert">
+                    <div className="modal-inline-alert-copy">
+                      <strong>如果这段会谈不需要保留</strong>
+                      <p>可以直接删除。删除会清理消息、关联督导记录与派生手帐，且无法恢复。</p>
+                    </div>
+                    <IconButton
+                      className="ghost-button danger-button modal-inline-delete-button"
+                      label="删除这段会谈"
+                      onClick={moveCompleteModalToDeleteFlow}
+                    >
+                      <TrashIcon />
+                    </IconButton>
+                  </div>
+                )}
                 <div className="modal-actions">
                   <button className="ghost-button" disabled={busy} onClick={() => setSessionToComplete(null)} type="button">
-                    继续会谈
+                    {sessionToCompleteNeedsMoreConversation ? "返回对话" : "继续会谈"}
                   </button>
-                  <button className="primary-button" disabled={busy} onClick={completeCurrentSession} type="button">
-                    {busy ? "正在结束..." : "确认结束"}
-                  </button>
+                  {sessionToCompleteNeedsMoreConversation ? (
+                    <button className="ghost-button danger-button" disabled={busy} onClick={moveCompleteModalToDeleteFlow} type="button">
+                      删除
+                    </button>
+                  ) : (
+                    <button className="primary-button" disabled={busy} onClick={completeCurrentSession} type="button">
+                      {busy ? "正在结束..." : "确认结束"}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>,
@@ -2123,8 +1237,28 @@ export function AppDashboard({ user }: { user: User }) {
                   <button className="ghost-button" disabled={busy} onClick={() => setCreatePanelOpen(false)} type="button">
                     取消
                   </button>
-                  <button className="primary-button" disabled={busy} onClick={createNewSession} type="button">
+                  <button className="primary-button" disabled={busy} onClick={handleCreateSessionStart} type="button">
                     {busy ? "处理中..." : "开始"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
+
+      {portalReady && activeSessionReminderOpen
+        ? createPortal(
+            <div className="modal-shell" role="dialog" aria-modal="true" aria-labelledby="active-session-reminder-title">
+              <div className="modal-backdrop" onClick={() => setActiveSessionReminderOpen(false)} />
+              <div className="modal-card modal-card-compact modal-card-create-session">
+                <div className="modal-card-header">
+                  <h3 id="active-session-reminder-title">温馨提醒</h3>
+                  <p>{ACTIVE_SESSION_EXISTS_MESSAGE}</p>
+                </div>
+                <div className="modal-actions modal-actions-create-session">
+                  <button className="primary-button" onClick={() => setActiveSessionReminderOpen(false)} type="button">
+                    我知道了
                   </button>
                 </div>
               </div>

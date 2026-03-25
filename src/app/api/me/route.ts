@@ -1,22 +1,22 @@
 import { NextResponse } from "next/server";
 
+import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
+import { jsonWithKey } from "@/lib/api-response";
 import { getCurrentUser } from "@/lib/auth";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = API_RUNTIME;
+export const dynamic = API_DYNAMIC;
 
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) {
-    return NextResponse.json({ user: null });
+    return jsonWithKey("user", null);
   }
 
-  return NextResponse.json({
-    user: {
-      id: user.id,
-      username: user.username,
-      displayName: user.displayName,
-      role: user.role
-    }
+  return jsonWithKey("user", {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    role: user.role
   });
 }

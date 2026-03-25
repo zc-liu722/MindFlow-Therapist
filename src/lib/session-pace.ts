@@ -2,17 +2,38 @@ export const SESSION_PACE_CATALOG = [
   {
     value: "slow",
     label: "慢速",
-    description: "更多倾听，放慢推进节奏"
+    description: "更多倾听，放慢推进节奏",
+    targetTurns: 45,
+    progressProfile: {
+      openingRatio: 0.2,
+      explorationRatio: 0.4,
+      integrationRatio: 0.26,
+      closingRatio: 0.14
+    }
   },
   {
     value: "medium",
     label: "中速",
-    description: "保持平衡，兼顾倾听、聚焦与自然推进"
+    description: "保持平衡，兼顾倾听、聚焦与自然推进",
+    targetTurns: 30,
+    progressProfile: {
+      openingRatio: 0.18,
+      explorationRatio: 0.38,
+      integrationRatio: 0.28,
+      closingRatio: 0.16
+    }
   },
   {
     value: "fast",
     label: "快速",
-    description: "更快聚焦，更快帮助收尾"
+    description: "更快聚焦，更快帮助收尾",
+    targetTurns: 15,
+    progressProfile: {
+      openingRatio: 0.16,
+      explorationRatio: 0.34,
+      integrationRatio: 0.3,
+      closingRatio: 0.2
+    }
   }
 ] as const;
 

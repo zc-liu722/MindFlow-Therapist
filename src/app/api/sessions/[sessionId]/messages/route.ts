@@ -1,26 +1,28 @@
 import { NextResponse } from "next/server";
 
 import { requireRole } from "@/lib/auth";
+import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
+import {
+  errorResponse,
+  getErrorMessage,
+  isGuardrailMessage
+} from "@/lib/api-errors";
+import type { SessionMessageRequestBody, SessionRouteContext } from "@/lib/api-types";
+import {
+  applyUserRateLimit,
+  parseJsonBody,
+  requireTrimmedString
+} from "@/lib/api-route";
 import { AnthropicConfigError, AnthropicRequestError } from "@/lib/anthropic";
 import { appendMessageStream, getSessionForUser } from "@/lib/domain";
 import { enforceInputGuardrail } from "@/lib/guardrails";
 import { MoonshotConfigError, MoonshotRequestError } from "@/lib/moonshot";
-import { assertRateLimit } from "@/lib/rate-limit";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = API_RUNTIME;
+export const dynamic = API_DYNAMIC;
 
 function toSseEvent(event: string, payload: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
-}
-
-function isGuardrailMessage(message: string) {
-  return (
-    message.includes("检测到") ||
-    message.includes("账号已") ||
-    message.includes("不予回复") ||
-    message.includes("封禁")
-  );
 }
 
 function toClientSafeErrorMessage(error: unknown) {
@@ -36,7 +38,7 @@ function toClientSafeErrorMessage(error: unknown) {
     return "思考转译暂时不可用，请稍后再试。";
   }
 
-  const message = error instanceof Error ? error.message : "发送失败";
+  const message = getErrorMessage(error, "发送失败");
   if (
     message === "NOT_FOUND" ||
     message === "SESSION_CLOSED" ||
@@ -53,20 +55,17 @@ function toClientSafeErrorMessage(error: unknown) {
 
 export async function POST(
   request: Request,
-  context: { params: Promise<{ sessionId: string }> }
+  context: SessionRouteContext
 ) {
   try {
     const user = await requireRole("user");
     const { sessionId } = await context.params;
-    assertRateLimit({
-      key: `session-message:user:${user.id}:${sessionId}`,
-      limit: 30,
-      windowMs: 60_000
-    });
-    const body = (await request.json()) as { content?: string };
+    applyUserRateLimit("session-message", user.id, 30, 60_000, sessionId);
+    const body = await parseJsonBody<SessionMessageRequestBody>(request);
 
-    if (!body.content?.trim()) {
-      return NextResponse.json({ error: "请输入内容" }, { status: 400 });
+    const content = requireTrimmedString(body.content, "请输入内容");
+    if (content instanceof NextResponse) {
+      return content;
     }
 
     const session = await getSessionForUser(user.id, sessionId);
@@ -74,7 +73,7 @@ export async function POST(
     await enforceInputGuardrail({
       user,
       sessionId,
-      content: body.content,
+      content,
       sessionTitle: session.title,
       messages: session.messages
     });
@@ -85,7 +84,7 @@ export async function POST(
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          const result = await appendMessageStream(user, sessionId, body.content!, pageLanguage, {
+          const result = await appendMessageStream(user, sessionId, content, pageLanguage, {
             onThinkingSummary(payload) {
               controller.enqueue(encoder.encode(toSseEvent("thinking", payload)));
             },
@@ -113,29 +112,28 @@ export async function POST(
       }
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "发送失败";
-    const status =
-      message === "UNAUTHORIZED"
-        ? 401
-        : message === "FORBIDDEN"
-          ? 403
-          : message === "NOT_FOUND"
-        ? 404
-        : message === "SESSION_CLOSED"
-          ? 409
-          : message === "RATE_LIMITED"
-            ? 429
-          : isGuardrailMessage(message)
-            ? 403
-          : error instanceof AnthropicConfigError
-            ? 503
-          : error instanceof AnthropicRequestError
-            ? error.status
-            : error instanceof MoonshotConfigError
-              ? 503
-              : error instanceof MoonshotRequestError
-              ? error.status
-              : 400;
-    return NextResponse.json({ error: message }, { status });
+    return errorResponse(
+      error,
+      "发送失败",
+      [
+        { match: "UNAUTHORIZED", status: 401 },
+        { match: "FORBIDDEN", status: 403 },
+        { match: "NOT_FOUND", status: 404 },
+        { match: "SESSION_CLOSED", status: 409 },
+        { match: "RATE_LIMITED", status: 429 },
+        { match: ({ message }) => isGuardrailMessage(message), status: 403 },
+        { match: ({ error: current }) => current instanceof AnthropicConfigError, status: 503 },
+        {
+          match: ({ error: current }) => current instanceof AnthropicRequestError,
+          status: error instanceof AnthropicRequestError ? error.status : 400
+        },
+        { match: ({ error: current }) => current instanceof MoonshotConfigError, status: 503 },
+        {
+          match: ({ error: current }) => current instanceof MoonshotRequestError,
+          status: error instanceof MoonshotRequestError ? error.status : 400
+        }
+      ],
+      400
+    );
   }
 }

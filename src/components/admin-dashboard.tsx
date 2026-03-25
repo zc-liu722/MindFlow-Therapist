@@ -1,141 +1,23 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useAdminActions } from "@/hooks/use-admin-actions";
+import { useAdminData } from "@/hooks/use-admin-data";
+import { formatDateOnly, formatDateTime } from "@/lib/date-format";
+import type { PublicUser } from "@/lib/api-types";
 
-type User = {
-  displayName: string;
-  username: string;
-};
-
-type Overview = {
-  totalUsers: number;
-  totalSessions: number;
-  completedSessions: number;
-  supervisionRate: number;
-  averageTurns: number;
-  moderationSummary: {
-    totalIncidents: number;
-    suspendedUsers: number;
-    bannedUsers: number;
-  };
-  riskDistribution: { low: number; medium: number; high: number };
-  sessionsByDay: { date: string; count: number }[];
-  eventsByType: { type: string; count: number }[];
-  recentModerationIncidents: {
-    id: string;
-    userId: string;
-    username: string;
-    displayName: string;
-    sessionId?: string;
-    category: string;
-    action: string;
-    reason: string;
-    evidencePreview: string;
-    createdAt: string;
-  }[];
-  affectedAccounts: {
-    userId: string;
-    username: string;
-    displayName: string;
-    status: "active" | "suspended" | "banned";
-    statusLabel: string;
-    warningCount: number;
-    suspendedUntil?: string;
-    bannedAt?: string;
-    banReason?: string;
-    lastIncidentAt?: string;
-    incidentCount: number;
-    latestReason: string;
-    latestCategory: string;
-  }[];
-};
-
-function formatDateOnly(value?: string) {
-  if (!value) {
-    return "-";
-  }
-
-  const [year = "", month = "", day = ""] = value.slice(0, 10).split("-");
-  if (!year || !month || !day) {
-    return value;
-  }
-
-  return `${year.slice(-2)}/${month}/${day}`;
-}
-
-function formatDateTime(value?: string) {
-  if (!value) {
-    return "-";
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  const year = String(date.getFullYear()).slice(-2);
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-
-  return `${year}/${month}/${day} ${hour}:${minute}`;
-}
+type User = Pick<PublicUser, "displayName" | "username">;
 
 export function AdminDashboard({ user }: { user: User }) {
   const router = useRouter();
-  const [overview, setOverview] = useState<Overview | null>(null);
   const [notice, setNotice] = useState("");
-  const [busyAction, setBusyAction] = useState("");
-
-  async function loadOverview() {
-    const response = await fetch("/api/admin/overview");
-    if (!response.ok) {
-      return;
-    }
-    const payload = (await response.json()) as Overview;
-    setOverview(payload);
-  }
-
-  async function runModerationAction(userId: string, action: "reinstate" | "clear_warnings") {
-    const key = `${action}:${userId}`;
-    setBusyAction(key);
-    setNotice("");
-
-    try {
-      const response = await fetch("/api/admin/moderation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, action })
-      });
-
-      const payload = (await response.json()) as { error?: string };
-      if (!response.ok) {
-        setNotice(payload.error ?? "操作失败");
-        return;
-      }
-
-      setNotice(action === "reinstate" ? "已恢复该账号访问权限" : "已清零该账号警告计数");
-      await loadOverview();
-    } catch {
-      setNotice("操作失败");
-    } finally {
-      setBusyAction("");
-    }
-  }
-
-  useEffect(() => {
-    void (async () => {
-      await loadOverview();
-    })();
-  }, []);
-
-  async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.push("/");
-    router.refresh();
-  }
+  const { overview, loadOverview } = useAdminData({ setNotice });
+  const { busyAction, runModerationAction, logout } = useAdminActions({
+    router,
+    loadOverview,
+    setNotice
+  });
 
   return (
     <main className="admin-shell">

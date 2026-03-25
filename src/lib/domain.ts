@@ -7,6 +7,17 @@ import { readDb, writeDb } from "@/lib/db";
 import { buildTherapyJournal } from "@/lib/ai";
 import { generateSupervisionArtifacts, generateTherapyReply } from "@/lib/anthropic";
 import { createThinkingHumanizer } from "@/lib/moonshot";
+import type {
+  SessionCompleteResult,
+  SessionCreateResult,
+  SessionDeleteResult,
+  SessionDetailResult,
+  SessionListResult,
+  SessionSupervisionResult,
+  SessionUpdateResult,
+  SupervisionJournalResult,
+  TherapyJournalResult
+} from "@/lib/domain-types";
 import { normalizeSessionMode } from "@/lib/session-modes";
 import { DEFAULT_SESSION_PACE, normalizeSessionPace } from "@/lib/session-pace";
 import type {
@@ -19,12 +30,12 @@ import type {
   UserRecord
 } from "@/lib/types";
 
-function emptyTranscript(userId: string) {
-  return encryptForUser(userId, JSON.stringify([] satisfies ChatMessage[]));
+function parseTranscript(session: TherapySessionRecord): ChatMessage[] {
+  return JSON.parse(decryptForUser(session.userId, session.transcript)) as ChatMessage[];
 }
 
-function parseTranscript(session: TherapySessionRecord) {
-  return JSON.parse(decryptForUser(session.userId, session.transcript)) as ChatMessage[];
+function parseVisibleTranscript(session: TherapySessionRecord): ChatMessage[] {
+  return visibleMessages(parseTranscript(session));
 }
 
 function formatSupervisionFailureReason(error: unknown) {
@@ -43,7 +54,27 @@ function visibleMessages(messages: ChatMessage[]) {
   return messages.filter(isVisibleMessage);
 }
 
-function parseTranscriptSafely(session: TherapySessionRecord) {
+function findSessionForUser(
+  sessions: TherapySessionRecord[],
+  userId: string,
+  sessionId: string
+) {
+  return sessions.find((item) => item.id === sessionId && item.userId === userId);
+}
+
+function buildSessionResponse(session: TherapySessionRecord): SessionDetailResult {
+  const messages = parseVisibleTranscript(session);
+
+  return {
+    ...session,
+    mode: normalizeSessionMode(session.mode),
+    pace: normalizeSessionPace(session.pace),
+    messageCount: messages.length,
+    messages
+  };
+}
+
+function parseTranscriptSafely(session: TherapySessionRecord): ChatMessage[] | null {
   try {
     return parseTranscript(session);
   } catch {
@@ -66,7 +97,7 @@ function logEvent(user: UserRecord, type: AnalyticsEventRecord["type"], metadata
   });
 }
 
-export async function listSessionsForUser(userId: string) {
+export async function listSessionsForUser(userId: string): Promise<SessionListResult> {
   const db = await readDb();
   return db.therapySessions
     .filter((session) => session.userId === userId)
@@ -78,21 +109,17 @@ export async function listSessionsForUser(userId: string) {
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-export async function getSessionForUser(userId: string, sessionId: string) {
+export async function getSessionForUser(
+  userId: string,
+  sessionId: string
+): Promise<SessionDetailResult> {
   const db = await readDb();
-  const session = db.therapySessions.find(
-    (item) => item.id === sessionId && item.userId === userId
-  );
+  const session = findSessionForUser(db.therapySessions, userId, sessionId);
   if (!session) {
     throw new Error("NOT_FOUND");
   }
-  return {
-    ...session,
-    mode: normalizeSessionMode(session.mode),
-    pace: normalizeSessionPace(session.pace),
-    messageCount: visibleMessages(parseTranscript(session)).length,
-    messages: visibleMessages(parseTranscript(session))
-  };
+
+  return buildSessionResponse(session);
 }
 
 function readJournalContentFromDb(
@@ -156,13 +183,22 @@ function buildSessionContextMessages(input: {
 
 export async function createSession(
   user: UserRecord,
-  input: { title: string; mode: string; pace?: string }
-) {
+  input: { title: string; mode: string; pace?: string; autoSupervision?: boolean }
+): Promise<SessionCreateResult> {
   const normalizedMode = normalizeSessionMode(input.mode);
   const normalizedPace = normalizeSessionPace(input.pace);
+  const autoSupervision = input.autoSupervision ?? true;
   await preloadTherapistCoreRule();
   const modeRules = await preloadModeRules(normalizedMode);
   const db = await readDb();
+  const activeSession = db.therapySessions.find(
+    (session) => session.userId === user.id && session.status === "active"
+  );
+
+  if (activeSession) {
+    throw new Error("ACTIVE_SESSION_EXISTS");
+  }
+
   const therapyJournal = readJournalContentFromDb(db, user.id, "therapy");
   const supervisionJournal = readJournalContentFromDb(db, user.id, "supervision");
   const contextMessages = buildSessionContextMessages({
@@ -180,7 +216,7 @@ export async function createSession(
     mode: normalizedMode,
     pace: normalizedPace,
     status: "active",
-    autoSupervision: true,
+    autoSupervision,
     createdAt: now,
     updatedAt: now,
     lastMessagePreview: "等待来访者开始",
@@ -198,7 +234,7 @@ export async function createSession(
   await logEvent(
     user,
     "session_created",
-    { autoSupervision: true, pace: normalizedPace },
+    { autoSupervision, pace: normalizedPace },
     session.id
   );
   return session;
@@ -293,7 +329,7 @@ function buildMergedSupervisionArtifacts(
 function resolveSupervisionRunSessionId(
   sessions: TherapySessionRecord[],
   run: SupervisionRunRecord
-) {
+): string | null {
   const directMatch = sessions.find((session) => session.id === run.sessionId);
   if (directMatch) {
     return directMatch.id;
@@ -307,82 +343,76 @@ function resolveSupervisionRunSessionId(
   return null;
 }
 
-export async function appendMessage(
-  user: UserRecord,
-  sessionId: string,
-  userContent: string
-) {
-  const db = await readDb();
-  const session = db.therapySessions.find(
-    (item) => item.id === sessionId && item.userId === user.id
-  );
-
-  if (!session) {
-    throw new Error("NOT_FOUND");
-  }
-  if (session.status !== "active") {
-    throw new Error("SESSION_CLOSED");
-  }
-
-  const transcript = parseTranscript(session);
-  const userMessage: ChatMessage = {
+function buildUserMessage(userContent: string): ChatMessage {
+  return {
     id: createId("msg"),
-    role: "user",
+    role: "user" as const,
     content: userContent.trim(),
     createdAt: new Date().toISOString()
   };
+}
 
-  const draftMessages = [...transcript, userMessage];
-  const assistantOutput = await generateTherapyReply({
-    title: session.title,
-    mode: session.mode,
-    pace: normalizeSessionPace(session.pace),
-    messages: draftMessages
-  });
-  const nextMessages = [...draftMessages, assistantOutput.message];
-  let persisted = false;
+function updateSessionAfterReply(input: {
+  session: TherapySessionRecord;
+  userId: string;
+  nextMessages: ChatMessage[];
+  replyContent: string;
+  themes: string[];
+  riskLevel: TherapySessionRecord["riskLevel"];
+  pace?: string;
+}): void {
+  input.session.transcript = encryptForUser(input.userId, JSON.stringify(input.nextMessages));
+  input.session.updatedAt = new Date().toISOString();
+  input.session.lastMessagePreview = input.replyContent.slice(0, 80);
+  input.session.redactedSummary = `近期聚焦 ${input.themes.join("、")}。`;
+  input.session.messageCount = visibleMessages(input.nextMessages).length;
+  input.session.riskLevel = input.riskLevel;
 
-  await writeDb((draft) => {
-    const mutableSession = draft.therapySessions.find((item) => item.id === sessionId);
-    if (!mutableSession) {
-      return;
-    }
-    if (mutableSession.status !== "active") {
-      return;
-    }
-
-    mutableSession.transcript = encryptForUser(user.id, JSON.stringify(nextMessages));
-    mutableSession.updatedAt = new Date().toISOString();
-    mutableSession.lastMessagePreview = assistantOutput.message.content.slice(0, 80);
-    mutableSession.redactedSummary = `近期聚焦 ${assistantOutput.themes.join("、")}。`;
-    mutableSession.messageCount = visibleMessages(nextMessages).length;
-    mutableSession.riskLevel = assistantOutput.riskLevel;
-    persisted = true;
-  });
-
-  if (!persisted) {
-    throw new Error("SESSION_CLOSED");
+  if (input.pace) {
+    input.session.pace = normalizeSessionPace(input.pace);
   }
+}
 
-  await logEvent(
-    user,
-    "message_sent",
-    { messageLength: userContent.length, riskLevel: assistantOutput.riskLevel },
-    sessionId
-  );
-
-  return {
-    userMessage,
-    assistantMessage: assistantOutput.message,
-    riskLevel: assistantOutput.riskLevel
+function buildSupervisionRecords(input: {
+  userId: string;
+  session: TherapySessionRecord;
+  journalContent: string | null;
+  output: Awaited<ReturnType<typeof generateSupervisionArtifacts>>;
+  now?: string;
+}): { run: SupervisionRunRecord; journal: SupervisionJournalRecord } {
+  const now = input.now ?? new Date().toISOString();
+  const run: SupervisionRunRecord = {
+    id: createId("supervision"),
+    userId: input.userId,
+    sessionId: input.session.id,
+    status: "completed",
+    createdAt: now,
+    completedAt: now,
+    transcript: encryptForUser(input.userId, JSON.stringify(input.output.transcript)),
+    journalEntry: encryptForUser(input.userId, input.output.journalEntry),
+    redactedSummary: input.output.redactedSummary,
+    journalEntryPreview: input.output.journalEntryPreview
   };
+
+  const journal: SupervisionJournalRecord = {
+    id: createId("supervision_journal"),
+    userId: input.userId,
+    updatedAt: now,
+    content: encryptForUser(
+      input.userId,
+      mergeJournalContent(input.journalContent, input.output.journalEntry)
+    ),
+    redactedSummary: input.output.redactedSummary
+  };
+
+  return { run, journal };
 }
 
 export async function updateSessionPace(
   user: UserRecord,
   sessionId: string,
   pace: string
-) {
+): Promise<SessionUpdateResult> {
   const normalizedPace = normalizeSessionPace(pace);
   let updated = false;
 
@@ -437,12 +467,7 @@ export async function appendMessageStream(
       handlers?.onThinkingSummary?.({ summary });
     }
   });
-  const userMessage: ChatMessage = {
-    id: createId("msg"),
-    role: "user",
-    content: userContent.trim(),
-    createdAt: new Date().toISOString()
-  };
+  const userMessage = buildUserMessage(userContent);
 
   const draftMessages = [...transcript, userMessage];
   const assistantOutput = await generateTherapyReply({
@@ -478,13 +503,15 @@ export async function appendMessageStream(
       return;
     }
 
-    mutableSession.transcript = encryptForUser(user.id, JSON.stringify(nextMessages));
-    mutableSession.updatedAt = new Date().toISOString();
-    mutableSession.lastMessagePreview = assistantMessage.content.slice(0, 80);
-    mutableSession.redactedSummary = `近期聚焦 ${assistantOutput.themes.join("、")}。`;
-    mutableSession.messageCount = visibleMessages(nextMessages).length;
-    mutableSession.riskLevel = assistantOutput.riskLevel;
-    mutableSession.pace = normalizeSessionPace(mutableSession.pace ?? DEFAULT_SESSION_PACE);
+    updateSessionAfterReply({
+      session: mutableSession,
+      userId: user.id,
+      nextMessages,
+      replyContent: assistantMessage.content,
+      themes: assistantOutput.themes,
+      riskLevel: assistantOutput.riskLevel,
+      pace: mutableSession.pace ?? DEFAULT_SESSION_PACE
+    });
     persisted = true;
   });
 
@@ -567,7 +594,10 @@ async function releaseCompletionLock(userId: string, sessionId: string, lockId: 
   });
 }
 
-export async function completeSession(user: UserRecord, sessionId: string) {
+export async function completeSession(
+  user: UserRecord,
+  sessionId: string
+): Promise<SessionCompleteResult> {
   const db = await readDb();
   const session = db.therapySessions.find(
     (item) => item.id === sessionId && item.userId === user.id
@@ -638,39 +668,23 @@ export async function completeSession(user: UserRecord, sessionId: string) {
             ? decryptForUser(user.id, supervisionJournalExisting.content)
             : null
         });
-        supervisionRun = {
-          id: createId("supervision"),
+        const supervisionArtifacts = buildSupervisionRecords({
           userId: user.id,
-          sessionId: session.id,
-          status: "completed",
-          createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          transcript: encryptForUser(user.id, JSON.stringify(supervisionOutput.transcript)),
-          journalEntry: encryptForUser(user.id, supervisionOutput.journalEntry),
-          redactedSummary: supervisionOutput.redactedSummary,
-          journalEntryPreview: supervisionOutput.journalEntryPreview
-        };
-
-        const mergedSupervision = mergeJournalContent(
-          supervisionJournalExisting
+          session,
+          journalContent: supervisionJournalExisting
             ? decryptForUser(user.id, supervisionJournalExisting.content)
             : null,
-          supervisionOutput.journalEntry
-        );
-
-        supervisionJournal = supervisionJournalExisting ?? {
-          id: createId("supervision_journal"),
-          userId: user.id,
-          updatedAt: new Date().toISOString(),
-          content: encryptForUser(user.id, mergedSupervision),
-          redactedSummary: supervisionOutput.redactedSummary
-        };
-
-        if (supervisionJournalExisting) {
-          supervisionJournal.updatedAt = new Date().toISOString();
-          supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
-          supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
-        }
+          output: supervisionOutput
+        });
+        supervisionRun = supervisionArtifacts.run;
+        supervisionJournal = supervisionJournalExisting
+          ? {
+              ...supervisionJournalExisting,
+              updatedAt: supervisionArtifacts.journal.updatedAt,
+              content: supervisionArtifacts.journal.content,
+              redactedSummary: supervisionArtifacts.journal.redactedSummary
+            }
+          : supervisionArtifacts.journal;
       } catch (error) {
         supervisionFailed = true;
         supervisionFailureReason = formatSupervisionFailureReason(error);
@@ -772,7 +786,10 @@ export async function completeSession(user: UserRecord, sessionId: string) {
   };
 }
 
-export async function rerunSupervisionForSession(user: UserRecord, sessionId: string) {
+export async function rerunSupervisionForSession(
+  user: UserRecord,
+  sessionId: string
+): Promise<SessionSupervisionResult> {
   const db = await readDb();
   const session = db.therapySessions.find(
     (item) => item.id === sessionId && item.userId === user.id
@@ -798,47 +815,29 @@ export async function rerunSupervisionForSession(user: UserRecord, sessionId: st
   const supervisionJournalExisting = db.supervisionJournals.find(
     (item) => item.userId === user.id
   );
+  const existingJournalContent = supervisionJournalExisting
+    ? decryptForUser(user.id, supervisionJournalExisting.content)
+    : null;
   const supervisionOutput = await generateSupervisionArtifacts({
     sessionTitle: session.title,
     messages,
-    supervisionJournal: supervisionJournalExisting
-      ? decryptForUser(user.id, supervisionJournalExisting.content)
-      : null
+    supervisionJournal: existingJournalContent
   });
-  const now = new Date().toISOString();
-  const supervisionRun: SupervisionRunRecord = {
-    id: createId("supervision"),
+  const supervisionArtifacts = buildSupervisionRecords({
     userId: user.id,
-    sessionId: session.id,
-    status: "completed",
-    createdAt: now,
-    completedAt: now,
-    transcript: encryptForUser(user.id, JSON.stringify(supervisionOutput.transcript)),
-    journalEntry: encryptForUser(user.id, supervisionOutput.journalEntry),
-    redactedSummary: supervisionOutput.redactedSummary,
-    journalEntryPreview: supervisionOutput.journalEntryPreview
-  };
-
-  const mergedSupervision = mergeJournalContent(
-    supervisionJournalExisting
-      ? decryptForUser(user.id, supervisionJournalExisting.content)
-      : null,
-    supervisionOutput.journalEntry
-  );
-
-  const supervisionJournal: SupervisionJournalRecord = supervisionJournalExisting ?? {
-    id: createId("supervision_journal"),
-    userId: user.id,
-    updatedAt: now,
-    content: encryptForUser(user.id, mergedSupervision),
-    redactedSummary: supervisionOutput.redactedSummary
-  };
-
-  if (supervisionJournalExisting) {
-    supervisionJournal.updatedAt = now;
-    supervisionJournal.content = encryptForUser(user.id, mergedSupervision);
-    supervisionJournal.redactedSummary = supervisionOutput.redactedSummary;
-  }
+    session,
+    journalContent: existingJournalContent,
+    output: supervisionOutput
+  });
+  const supervisionRun = supervisionArtifacts.run;
+  const supervisionJournal = supervisionJournalExisting
+    ? {
+        ...supervisionJournalExisting,
+        updatedAt: supervisionArtifacts.journal.updatedAt,
+        content: supervisionArtifacts.journal.content,
+        redactedSummary: supervisionArtifacts.journal.redactedSummary
+      }
+    : supervisionArtifacts.journal;
 
   await writeDb((draft) => {
     const mutableSession = draft.therapySessions.find(
@@ -876,7 +875,10 @@ export async function rerunSupervisionForSession(user: UserRecord, sessionId: st
   };
 }
 
-export async function deleteSessionForUser(user: UserRecord, sessionId: string) {
+export async function deleteSessionForUser(
+  user: UserRecord,
+  sessionId: string
+): Promise<SessionDeleteResult> {
   const db = await readDb();
   const session = db.therapySessions.find(
     (item) => item.id === sessionId && item.userId === user.id
@@ -964,7 +966,7 @@ export async function deleteSessionForUser(user: UserRecord, sessionId: string) 
   };
 }
 
-export async function getTherapyJournal(userId: string) {
+export async function getTherapyJournal(userId: string): Promise<TherapyJournalResult> {
   const db = await readDb();
   const journal = db.therapyJournals.find((item) => item.userId === userId);
   if (!journal) {
@@ -987,7 +989,9 @@ export async function getTherapyJournal(userId: string) {
   }
 }
 
-export async function getSupervisionJournal(userId: string) {
+export async function getSupervisionJournal(
+  userId: string
+): Promise<SupervisionJournalResult> {
   const db = await readDb();
   const journal = db.supervisionJournals.find((item) => item.userId === userId);
   const completedSessions = db.therapySessions.filter(
