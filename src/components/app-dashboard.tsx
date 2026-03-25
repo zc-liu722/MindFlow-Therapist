@@ -1750,8 +1750,21 @@ export function AppDashboard({ user }: { user: User }) {
                                 onClick={handleComposerFocus}
                                 onKeyDown={handleComposerKeyDown}
                               />
-                              <button className="primary-button composer-submit" disabled={busy} type="submit">
-                                {busy ? "正在回复..." : "发送"}
+                              <button
+                                className="composer-submit"
+                                aria-label={busy ? "正在回复" : "发送消息"}
+                                disabled={busy || !messageInput.trim()}
+                                type="submit"
+                              >
+                                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none">
+                                  <path
+                                    d="M10 14.25V5.75M10 5.75L6.5 9.25M10 5.75L13.5 9.25"
+                                    stroke="currentColor"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth="1.9"
+                                  />
+                                </svg>
                               </button>
                             </div>
                           </form>

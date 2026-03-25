@@ -3608,6 +3608,11 @@ a {
     0 24px 36px -28px rgba(197, 128, 160, 0.18);
 }
 
+:root[data-theme="light"] .composer-stage textarea {
+  background: transparent;
+  box-shadow: none;
+}
+
 :root[data-theme="light"] .composer-locked {
   background:
     linear-gradient(135deg, rgba(255, 252, 255, 0.62), rgba(255, 236, 243, 0.48) 55%, rgba(255, 239, 225, 0.38)),
@@ -3698,16 +3703,48 @@ a {
   position: relative;
   width: fit-content;
   max-width: min(68%, 38rem);
-  padding: 0.95rem 1rem 0.9rem;
-  border-radius: 22px;
+  padding: 1rem 1.08rem 0.94rem;
+  border-radius: 28px 28px 28px 18px;
   line-height: 1.72;
   border: 1px solid color-mix(in srgb, var(--line-strong) 78%, transparent);
   box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 10px 18px -12px rgba(7, 10, 18, 0.1),
     0 24px 34px -24px rgba(7, 10, 18, 0.18);
   transform-origin: bottom center;
   overflow-wrap: anywhere;
-  overflow: hidden;
+  isolation: isolate;
+}
+
+.bubble::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at 18% 18%, rgba(255, 255, 255, 0.13), transparent 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 44%);
+  opacity: 0.9;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -1rem;
+  width: 1.1rem;
+  height: 1rem;
+  border-radius: 0.25rem 0.85rem 0.2rem 0.85rem;
+  background: inherit;
+  border: inherit;
+  box-shadow: inherit;
+  z-index: -1;
+}
+
+.bubble > * {
+  position: relative;
+  z-index: 1;
 }
 
 .bubble-enter {
@@ -3969,21 +4006,47 @@ a {
 
 .bubble-user {
   background: var(--surface-bubble-user);
-  border-bottom-right-radius: 8px;
+  border-radius: 28px 28px 14px 28px;
+  margin-right: 1.56rem;
+  margin-bottom: 0.78rem;
+}
+
+.bubble-user::after {
+  right: -1.02rem;
+  transform: rotate(-21deg) skewX(-10deg);
+  clip-path: polygon(14% 18%, 100% 0, 88% 92%, 0 100%);
 }
 
 .bubble-ai {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.04)),
     var(--surface-bubble-ai);
-  border-bottom-left-radius: 8px;
+  border-radius: 28px 28px 28px 14px;
+  margin-left: 1.56rem;
+  margin-bottom: 0.78rem;
+}
+
+.bubble-ai::after {
+  left: -0.98rem;
+  transform: rotate(18deg) skewX(3deg) scale(1.06);
+  border-radius: 0.76rem;
+  clip-path: polygon(10% 18%, 34% 4%, 68% 6%, 92% 28%, 96% 64%, 78% 92%, 40% 96%, 12% 76%, 4% 42%);
 }
 
 .bubble-support {
   background:
     linear-gradient(180deg, rgba(117, 255, 216, 0.08), rgba(117, 255, 216, 0.03)),
     var(--surface-bubble-support);
-  border-bottom-left-radius: 8px;
+  border-radius: 28px 28px 28px 14px;
+  margin-left: 1.56rem;
+  margin-bottom: 0.78rem;
+}
+
+.bubble-support::after {
+  left: -0.98rem;
+  transform: rotate(17deg) skewX(3deg) scale(1.06);
+  border-radius: 0.76rem;
+  clip-path: polygon(10% 18%, 34% 4%, 68% 6%, 92% 28%, 96% 64%, 78% 92%, 40% 96%, 12% 76%, 4% 42%);
 }
 
 .empty-state {
@@ -4029,12 +4092,11 @@ a {
 .composer-input-shell {
   --composer-max-lines: 4;
   position: relative;
-  display: flex;
-  align-items: flex-end;
+  display: block;
   padding: 0.42rem;
-  border-radius: 22px;
+  border-radius: 24px;
   background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(117, 255, 216, 0.04)),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(117, 255, 216, 0.05) 52%, rgba(103, 183, 255, 0.06)),
     color-mix(in srgb, var(--surface-glass) 92%, transparent);
   border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent);
   box-shadow:
@@ -4051,7 +4113,8 @@ a {
   border-radius: inherit;
   background:
     radial-gradient(circle at 18% 18%, rgba(255, 255, 255, 0.08), transparent 26%),
-    radial-gradient(circle at 82% 30%, rgba(117, 255, 216, 0.08), transparent 30%);
+    radial-gradient(circle at 82% 30%, rgba(117, 255, 216, 0.08), transparent 30%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 46%);
   opacity: 0.82;
   pointer-events: none;
 }
@@ -4059,8 +4122,10 @@ a {
 .composer-stage textarea {
   min-height: 2.55rem;
   max-height: calc(1.7em * var(--composer-max-lines) + 1.24rem);
-  padding: 0.56rem 6.3rem 0.56rem 0.82rem;
+  width: 100%;
+  padding: 0.9rem 4.8rem 0.9rem 1.05rem;
   border: 0;
+  border-radius: 20px;
   background: transparent;
   box-shadow: none;
   line-height: 1.62;
@@ -4080,13 +4145,47 @@ a {
 
 .composer-submit {
   position: absolute;
-  right: 0.58rem;
-  bottom: 0.5rem;
-  min-width: 4.55rem;
-  min-height: 2.3rem;
-  padding: 0.42rem 0.9rem;
-  border-radius: 16px;
-  box-shadow: 0 12px 28px rgba(229, 192, 210, 0.22);
+  top: 0.42rem;
+  bottom: 0.42rem;
+  right: 0.95rem;
+  margin-block: auto;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: #f9edf3;
+  background:
+    linear-gradient(180deg, rgba(255, 246, 250, 0.28), rgba(255, 228, 238, 0.2)),
+    linear-gradient(135deg, #c992aa, #b07c95);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    0 10px 22px rgba(28, 15, 25, 0.16);
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease;
+}
+
+.composer-submit svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.composer-submit:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.36),
+    0 14px 26px rgba(28, 15, 25, 0.2);
+}
+
+.composer-submit:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
 }
 
 .composer-locked {
@@ -5121,7 +5220,7 @@ a {
   .app-shell.app-shell-chat-active .view-stage-chat {
     --chat-toolbar-offset: calc(env(safe-area-inset-top, 0px) + 4.5rem);
     --chat-composer-gap: 1rem;
-    --chat-progress-gap: 1rem;
+    --chat-progress-gap: 2.4rem;
     border-radius: 0;
     background: transparent;
   }
@@ -5143,7 +5242,7 @@ a {
   }
 
   .app-shell.app-shell-chat-active .chat-stage-progress-overlay {
-    top: calc(var(--chat-progress-gap, 0px) + 0.2rem);
+    top: calc(var(--chat-progress-gap, 0px) + 0.45rem);
   }
 
   .app-shell,
@@ -5597,18 +5696,22 @@ a {
 
   .bubble {
     max-width: min(82%, 30rem);
-    padding: 0.92rem 0.95rem 0.9rem;
-    border-radius: 20px;
+    padding: 0.92rem 0.98rem 0.9rem;
+    border-radius: 24px 24px 24px 16px;
     line-height: 1.68;
   }
 
   .bubble-user {
-    border-bottom-right-radius: 10px;
+    border-radius: 24px 24px 12px 24px;
+    margin-right: 1.2rem;
+    margin-bottom: 0.62rem;
   }
 
   .bubble-ai,
   .bubble-support {
-    border-bottom-left-radius: 10px;
+    border-radius: 24px 24px 24px 12px;
+    margin-left: 1.2rem;
+    margin-bottom: 0.62rem;
   }
 
   .composer-stage {
@@ -5619,7 +5722,7 @@ a {
   .composer-input-shell {
     --composer-max-lines: 3;
     padding: 0.28rem;
-    border-radius: 18px;
+    border-radius: 22px;
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--line) 56%, transparent),
       0 10px 28px rgba(71, 26, 45, 0.12);
@@ -5628,19 +5731,18 @@ a {
   .composer-stage textarea {
     min-height: 2.1rem;
     max-height: calc(1.55em * var(--composer-max-lines) + 0.98rem);
-    padding: 0.42rem 4.7rem 0.42rem 0.68rem;
-    border-radius: 16px;
+    padding: 0.68rem 4rem 0.68rem 0.86rem;
+    border-radius: 18px;
     font-size: 16px;
     line-height: 1.48;
   }
 
   .composer-submit {
-    right: 0.34rem;
+    top: 0.28rem;
     bottom: 0.28rem;
-    min-width: 3.55rem;
-    min-height: 1.84rem;
-    padding: 0.28rem 0.66rem;
-    border-radius: 14px;
+    right: 0.72rem;
+    width: 2.45rem;
+    height: 2.45rem;
   }
 
   .notice {
