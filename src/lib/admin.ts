@@ -1,4 +1,5 @@
 import { createId } from "@/lib/crypto";
+import { ensureUserBillingState, resolveQuotaWindow } from "@/lib/billing";
 import { readDb, writeDb } from "@/lib/db";
 import type {
   AdminOverviewResult,
@@ -17,23 +18,58 @@ function formatModerationStatus(status: "active" | "suspended" | "banned") {
   }
 }
 
-function groupByDay(dates: string[]) {
-  const map = new Map<string, number>();
-  dates.forEach((value) => {
-    const day = value.slice(0, 10);
-    map.set(day, (map.get(day) ?? 0) + 1);
-  });
+function buildSessionOverviewMetrics(sessions: Awaited<ReturnType<typeof readDb>>["therapySessions"]) {
+  const metrics = sessions.reduce(
+    (acc, session) => {
+      if (session.status === "completed") {
+        acc.completedCount += 1;
+        if (session.supervisionId) {
+          acc.supervisionCount += 1;
+        }
+      }
 
-  return [...map.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([date, count]) => ({ date, count }));
+      acc.totalTurns += session.messageCount;
+      acc.riskDistribution[session.riskLevel] += 1;
+
+      const day = session.createdAt.slice(0, 10);
+      acc.sessionCountByDay.set(day, (acc.sessionCountByDay.get(day) ?? 0) + 1);
+      return acc;
+    },
+    {
+      completedCount: 0,
+      supervisionCount: 0,
+      totalTurns: 0,
+      riskDistribution: {
+        low: 0,
+        medium: 0,
+        high: 0
+      },
+      sessionCountByDay: new Map<string, number>()
+    }
+  );
+
+  return {
+    ...metrics,
+    sessionsByDay: [...metrics.sessionCountByDay.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, count]) => ({ date, count }))
+  };
+}
+
+function buildEventTypeSummary(events: Awaited<ReturnType<typeof readDb>>["analyticsEvents"]) {
+  const counts = events.reduce((acc, event) => {
+    acc.set(event.type, (acc.get(event.type) ?? 0) + 1);
+    return acc;
+  }, new Map<string, number>());
+
+  return [...counts.entries()].map(([type, count]) => ({ type, count }));
 }
 
 export async function getAdminOverview(): Promise<AdminOverviewResult> {
   const db = await readDb();
   const sessions = db.therapySessions;
-  const completed = sessions.filter((item) => item.status === "completed");
-  const supervisionCount = completed.filter((item) => item.supervisionId).length;
+  const quotaWindow = resolveQuotaWindow();
+  const sessionMetrics = buildSessionOverviewMetrics(sessions);
   const incidents = [...db.moderationIncidents].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
   const userById = new Map(db.users.map((user) => [user.id, user]));
@@ -83,41 +119,59 @@ export async function getAdminOverview(): Promise<AdminOverviewResult> {
     };
   });
 
-  const riskDistribution = {
-    low: sessions.filter((item) => item.riskLevel === "low").length,
-    medium: sessions.filter((item) => item.riskLevel === "medium").length,
-    high: sessions.filter((item) => item.riskLevel === "high").length
-  };
-
   const averageTurns =
     sessions.length === 0
       ? 0
       : Number(
           (
-            sessions.reduce((sum, item) => sum + item.messageCount, 0) / sessions.length
+            sessionMetrics.totalTurns / sessions.length
           ).toFixed(1)
         );
+  const billedUsers = db.users.filter((item) => item.role === "user").map((item) => ensureUserBillingState(item));
+  const usageEntries = db.usageLedger;
+  const monthlyUsageEntries = usageEntries.filter(
+    (item) =>
+      item.createdAt >= quotaWindow.quotaPeriodStart &&
+      item.createdAt <= quotaWindow.quotaPeriodEnd
+  );
+  const monthlySessionsConsumed = sessions.filter(
+    (item) =>
+      item.quotaChargedAt &&
+      item.quotaChargedAt >= quotaWindow.quotaPeriodStart &&
+      item.quotaChargedAt <= quotaWindow.quotaPeriodEnd
+  ).length;
 
   return {
     totalUsers: db.users.filter((item) => item.role === "user").length,
     totalSessions: sessions.length,
-    completedSessions: completed.length,
+    completedSessions: sessionMetrics.completedCount,
     supervisionRate:
-      completed.length === 0 ? 0 : Number(((supervisionCount / completed.length) * 100).toFixed(1)),
+      sessionMetrics.completedCount === 0
+        ? 0
+        : Number(
+            ((sessionMetrics.supervisionCount / sessionMetrics.completedCount) * 100).toFixed(1)
+          ),
     averageTurns,
+    billingSummary: {
+      freeUsers: billedUsers.filter((item) => item.plan === "free").length,
+      plusUsers: billedUsers.filter((item) => item.plan === "plus").length,
+      activePlusUsers: billedUsers.filter((item) => item.billing.isPlusActive).length,
+      monthlySessionsConsumed,
+      monthlyUsageCostCny: Number(
+        monthlyUsageEntries.reduce((sum, item) => sum + item.estimatedCostCny, 0).toFixed(2)
+      ),
+      totalUsageCostCny: Number(
+        usageEntries.reduce((sum, item) => sum + item.estimatedCostCny, 0).toFixed(2)
+      )
+    },
     moderationSummary: {
       totalIncidents: incidents.length,
       suspendedUsers: affectedAccounts.filter((item) => item.status === "suspended").length,
       bannedUsers: affectedAccounts.filter((item) => item.status === "banned").length
     },
-    riskDistribution,
-    sessionsByDay: groupByDay(sessions.map((item) => item.createdAt)),
-    eventsByType: Object.entries(
-      db.analyticsEvents.reduce<Record<string, number>>((acc, event) => {
-        acc[event.type] = (acc[event.type] ?? 0) + 1;
-        return acc;
-      }, {})
-    ).map(([type, count]) => ({ type, count })),
+    riskDistribution: sessionMetrics.riskDistribution,
+    sessionsByDay: sessionMetrics.sessionsByDay,
+    eventsByType: buildEventTypeSummary(db.analyticsEvents),
     recentModerationIncidents,
     affectedAccounts
   };

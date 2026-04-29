@@ -1,5 +1,5 @@
 import { getSessionPaceMeta, normalizeSessionPace } from "@/lib/session-pace";
-import type { AppSessionDetail as SessionDetail } from "@/lib/app-dashboard-types";
+import type { AppChatMessage } from "@/lib/app-dashboard-types";
 
 export type SessionProgressPhase = "opening" | "exploring" | "deepening" | "closing" | "completed";
 
@@ -9,6 +9,13 @@ export type SessionProgress = {
   phaseLabel: string;
   summary: string;
   detailLabel: string;
+};
+
+type SessionProgressInput = {
+  status: "active" | "completed";
+  pace?: string | null;
+  messageCount: number;
+  messages: AppChatMessage[];
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -49,7 +56,19 @@ function summarizeThemes(text: string) {
     .map(([label]) => label);
 }
 
-export function estimateSessionProgress(session: SessionDetail): SessionProgress {
+function getTrustedModelPhase(messages: AppChatMessage[]) {
+  const candidate = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.meta?.phase)?.meta?.phase;
+
+  if (!candidate || candidate.confidence < 0.55) {
+    return null;
+  }
+
+  return candidate;
+}
+
+export function estimateSessionProgress(session: SessionProgressInput): SessionProgress {
   const pace = normalizeSessionPace(session.pace);
   const paceMeta = getSessionPaceMeta(pace);
 
@@ -97,11 +116,19 @@ export function estimateSessionProgress(session: SessionDetail): SessionProgress
   const intensityScore = clamp(countMatches(recentUserText, HIGH_INTENSITY_PATTERNS) / 2, 0, 1);
   const turnProgress = clamp(exchangeCount / Math.max(paceMeta.targetTurns, 1), 0, 1);
 
+  const firstDisclosureScore = clamp(
+    userChars / 240 +
+      (longestUserMessage >= 60 ? 0.25 : 0) +
+      themeScore * 0.5 +
+      disclosureDepth * 0.3,
+    0,
+    1
+  );
   const contentOpening = clamp(
-    (userMessages.length > 0 ? 0.38 : 0) +
-      (assistantMessages.length > 0 ? 0.24 : 0) +
-      (userChars > 80 ? 0.16 : 0) +
-      Math.min(exchangeCount / 3, 1) * 0.22,
+    (userMessages.length > 0 ? 0.1 : 0) +
+      (assistantMessages.length > 0 ? 0.08 : 0) +
+      firstDisclosureScore * 0.62 +
+      Math.min(exchangeCount / 3, 1) * 0.2,
     0,
     1
   );
@@ -157,13 +184,20 @@ export function estimateSessionProgress(session: SessionDetail): SessionProgress
     0,
     1
   );
+  const trustedModelPhase = getTrustedModelPhase(assistantMessages);
 
   let phase: Exclude<SessionProgressPhase, "completed"> = "opening";
-  if (adjustedClosure >= 0.6 && expansionPressure <= 0.76) {
+  if (trustedModelPhase) {
+    phase = trustedModelPhase.phase;
+  } else if (adjustedClosure >= 0.6 && expansionPressure <= 0.76) {
     phase = "closing";
   } else if (adjustedDeepening >= 0.48) {
     phase = "deepening";
-  } else if (adjustedExploring >= 0.28 || userMessages.length >= 2 || themes.length > 0) {
+  } else if (
+    adjustedExploring >= 0.32 ||
+    (userMessages.length >= 2 && userChars >= 60) ||
+    themes.length > 0
+  ) {
     phase = "exploring";
   }
 
@@ -191,14 +225,16 @@ export function estimateSessionProgress(session: SessionDetail): SessionProgress
     99
   );
 
-  if (percent >= 86) {
-    phase = "closing";
-  } else if (percent >= 60) {
-    phase = "deepening";
-  } else if (percent >= 24) {
-    phase = "exploring";
-  } else {
-    phase = "opening";
+  if (!trustedModelPhase) {
+    if (percent >= 86) {
+      phase = "closing";
+    } else if (percent >= 60) {
+      phase = "deepening";
+    } else if (percent >= 24) {
+      phase = "exploring";
+    } else {
+      phase = "opening";
+    }
   }
 
   const detailLabel =
@@ -216,9 +252,15 @@ export function estimateSessionProgress(session: SessionDetail): SessionProgress
             : themes.length > 0
               ? `已浮现 ${themes.length} 个主题`
               : "正在继续澄清和展开"
-          : userMessages.length > 0
-            ? "已开始承接当前困扰"
-            : "等待第一条消息";
+          : userMessages.length === 0
+            ? "等待第一条消息"
+            : userChars < 20
+              ? "刚打过招呼，尚未切入正题"
+              : themes.length > 0
+                ? `已浮现 ${themes.length} 个主题`
+                : userChars < 80
+                  ? "正在了解你想聊什么"
+                  : "已开始承接当前困扰";
 
   const summary =
     phase === "closing"

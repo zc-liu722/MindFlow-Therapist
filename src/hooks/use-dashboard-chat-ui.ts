@@ -4,13 +4,12 @@ import {
   type Dispatch,
   type RefObject,
   type SetStateAction,
-  type UIEvent,
   useCallback,
   useEffect,
   useRef,
   useState
 } from "react";
-import { isStreamNearBottom } from "@/lib/app-dashboard-utils";
+import { isPageNearBottom, isStreamNearBottom } from "@/lib/app-dashboard-utils";
 import type { AppSessionDetail as SessionDetail } from "@/lib/app-dashboard-types";
 
 type UseDashboardChatUiOptions = {
@@ -55,12 +54,19 @@ export function useDashboardChatUi({
 
   const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const stream = streamRef.current;
-    if (!stream) {
+    const streamCanScroll =
+      !!stream && stream.scrollHeight - stream.clientHeight > 8 && stream.clientHeight > 0;
+
+    if (streamCanScroll) {
+      stream.scrollTo({
+        top: stream.scrollHeight,
+        behavior
+      });
       return;
     }
 
-    stream.scrollTo({
-      top: stream.scrollHeight,
+    window.scrollTo({
+      top: document.documentElement.scrollHeight,
       behavior
     });
   }, []);
@@ -121,15 +127,14 @@ export function useDashboardChatUi({
       current
         ? {
             ...current,
-            messages: current.messages.map((message) =>
-              message.id === messageId
+            streamingMessage:
+              current.streamingMessage?.id === messageId
                 ? {
-                    ...message,
-                    content: pendingUpdate.content ?? message.content,
-                    thinking: pendingUpdate.thinking ?? message.thinking ?? ""
+                    ...current.streamingMessage,
+                    content: pendingUpdate.content ?? current.streamingMessage.content,
+                    thinking: pendingUpdate.thinking ?? current.streamingMessage.thinking ?? ""
                   }
-                : message
-            )
+                : current.streamingMessage
           }
         : current
     );
@@ -297,27 +302,63 @@ export function useDashboardChatUi({
     };
   }, []);
 
-  const handleStreamScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    const stream = event.currentTarget;
-    const scrollTop = stream.scrollTop;
-    const previousScrollTop = lastStreamScrollTopRef.current;
+  const syncScrollState = useCallback(
+    (scrollTop: number, nearBottom: boolean) => {
+      const previousScrollTop = lastStreamScrollTopRef.current;
 
-    shouldStickToBottomRef.current = isStreamNearBottom(stream);
+      shouldStickToBottomRef.current = nearBottom;
 
-    if (window.innerWidth <= 780) {
-      const scrollingDown = scrollTop > previousScrollTop + 6;
-      const nearTop = scrollTop < 24;
+      if (window.innerWidth <= 780) {
+        const scrollingDown = scrollTop > previousScrollTop + 6;
+        const nearTop = scrollTop < 24;
 
-      if (nearTop) {
-        setMobileSessionBarCollapsed(false);
-      } else if (scrollingDown && scrollTop > 72) {
-        setMobileSessionBarCollapsed(true);
-        setPacePanelOpen(false);
+        if (nearTop) {
+          setMobileSessionBarCollapsed(false);
+        } else if (scrollingDown && scrollTop > 72) {
+          setMobileSessionBarCollapsed(true);
+          setPacePanelOpen(false);
+        }
       }
+
+      lastStreamScrollTopRef.current = scrollTop;
+    },
+    [setMobileSessionBarCollapsed, setPacePanelOpen]
+  );
+
+  const handleStreamScroll = useCallback(() => {
+    const stream = streamRef.current;
+    const streamCanScroll =
+      !!stream && stream.scrollHeight - stream.clientHeight > 8 && stream.clientHeight > 0;
+
+    if (streamCanScroll && stream) {
+      syncScrollState(stream.scrollTop, isStreamNearBottom(stream));
+      return;
     }
 
-    lastStreamScrollTopRef.current = scrollTop;
-  }, [setMobileSessionBarCollapsed, setPacePanelOpen]);
+    syncScrollState(window.scrollY, isPageNearBottom());
+  }, [syncScrollState]);
+
+  useEffect(() => {
+    if (view !== "chat") {
+      return;
+    }
+
+    const syncWindowScroll = () => {
+      const stream = streamRef.current;
+      const streamCanScroll =
+        !!stream && stream.scrollHeight - stream.clientHeight > 8 && stream.clientHeight > 0;
+
+      if (streamCanScroll) {
+        return;
+      }
+
+      syncScrollState(window.scrollY, isPageNearBottom());
+    };
+
+    syncWindowScroll();
+    window.addEventListener("scroll", syncWindowScroll, { passive: true });
+    return () => window.removeEventListener("scroll", syncWindowScroll);
+  }, [syncScrollState, view]);
 
   const toggleThinkingExpanded = useCallback((messageId: string) => {
     setExpandedThinkingIds((current) =>

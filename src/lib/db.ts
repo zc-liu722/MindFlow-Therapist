@@ -24,7 +24,9 @@ const emptyDb: DatabaseShape = {
   supervisionRuns: [],
   supervisionJournals: [],
   analyticsEvents: [],
-  moderationIncidents: []
+  moderationIncidents: [],
+  billingOrders: [],
+  usageLedger: []
 };
 
 async function ensureDbFile() {
@@ -51,7 +53,9 @@ export async function readDb(): Promise<DatabaseShape> {
     supervisionRuns: parsed.supervisionRuns ?? [],
     supervisionJournals: parsed.supervisionJournals ?? [],
     analyticsEvents: parsed.analyticsEvents ?? [],
-    moderationIncidents: parsed.moderationIncidents ?? []
+    moderationIncidents: parsed.moderationIncidents ?? [],
+    billingOrders: parsed.billingOrders ?? [],
+    usageLedger: parsed.usageLedger ?? []
   };
 }
 

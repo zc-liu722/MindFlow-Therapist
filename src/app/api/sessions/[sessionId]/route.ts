@@ -1,5 +1,4 @@
 import { requireRole } from "@/lib/auth";
-import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
 import { errorResponse } from "@/lib/api-errors";
 import type { SessionRouteContext, SessionUpdateRequestBody } from "@/lib/api-types";
 import { applyUserRateLimit, parseJsonBody } from "@/lib/api-route";
@@ -7,8 +6,8 @@ import { jsonWithKey, okJson } from "@/lib/api-response";
 import { deleteSessionForUser, getSessionForUser, updateSessionPace } from "@/lib/domain";
 import { normalizeSessionPace } from "@/lib/session-pace";
 
-export const runtime = API_RUNTIME;
-export const dynamic = API_DYNAMIC;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(
   request: Request,

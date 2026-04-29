@@ -1,3 +1,4 @@
+import { extractJsonBlock } from "@/lib/json-extract";
 import type { ChatMessage, ModerationCategory } from "@/lib/types";
 
 export class MoonshotConfigError extends Error {
@@ -38,6 +39,11 @@ type MoonshotChatResponse = {
     finish_reason?: string;
   }>;
   output_text?: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
   error?: {
     message?: string;
   };
@@ -51,6 +57,18 @@ type GuardrailAssessment = {
   reason: string;
   confidence: number;
 };
+
+type MoonshotUsage = {
+  inputTokens: number;
+  outputTokens: number;
+};
+
+function normalizeMoonshotUsage(payload?: MoonshotChatResponse) {
+  return {
+    inputTokens: payload?.usage?.prompt_tokens ?? 0,
+    outputTokens: payload?.usage?.completion_tokens ?? 0
+  };
+}
 
 function isFixedTemperatureModelError(message: string) {
   const lower = message.toLowerCase();
@@ -204,14 +222,22 @@ async function requestMoonshotText(input: {
 
         const retriedText = extractContent(payload);
         if (retriedText) {
-          return retriedText;
+          return {
+            text: retriedText,
+            usage: normalizeMoonshotUsage(payload),
+            model: config.model
+          };
         }
       }
 
       throw new MoonshotRequestError("Moonshot 返回了空内容", 502);
     }
 
-    return text;
+    return {
+      text,
+      usage: normalizeMoonshotUsage(payload),
+      model: config.model
+    };
   } catch (error) {
     if (error instanceof MoonshotConfigError || error instanceof MoonshotRequestError) {
       throw error;
@@ -228,21 +254,6 @@ async function requestMoonshotText(input: {
   } finally {
     clearTimeout(timeout);
   }
-}
-
-function extractJsonBlock(text: string) {
-  const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fencedMatch?.[1]) {
-    return fencedMatch[1].trim();
-  }
-
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    return text.slice(start, end + 1);
-  }
-
-  return text.trim();
 }
 
 function parseGuardrailAssessment(raw: string): GuardrailAssessment {
@@ -302,7 +313,11 @@ export async function summarizeThinkingSnapshot(input: {
   const rawThinking = input.rawThinking.trim();
 
   if (!rawThinking) {
-    return fallbackSummary(language);
+    return {
+      text: fallbackSummary(language),
+      usage: { inputTokens: 0, outputTokens: 0 } satisfies MoonshotUsage,
+      model: DEFAULT_MOONSHOT_MODEL
+    };
   }
 
   try {
@@ -328,7 +343,11 @@ export async function summarizeThinkingSnapshot(input: {
       maxTokens: language === "zh" ? 96 : 80
     });
   } catch {
-    return fallbackSummary(language);
+    return {
+      text: fallbackSummary(language),
+      usage: { inputTokens: 0, outputTokens: 0 } satisfies MoonshotUsage,
+      model: DEFAULT_MOONSHOT_MODEL
+    };
   }
 }
 
@@ -340,7 +359,11 @@ export async function humanizeThinkingTranscript(input: {
   const rawThinking = input.rawThinking.trim();
 
   if (!rawThinking) {
-    return fallbackTranscript(language);
+    return {
+      text: fallbackTranscript(language),
+      usage: { inputTokens: 0, outputTokens: 0 } satisfies MoonshotUsage,
+      model: DEFAULT_MOONSHOT_MODEL
+    };
   }
 
   try {
@@ -368,7 +391,11 @@ export async function humanizeThinkingTranscript(input: {
       maxTokens: language === "zh" ? 220 : 180
     });
   } catch {
-    return fallbackTranscript(language);
+    return {
+      text: fallbackTranscript(language),
+      usage: { inputTokens: 0, outputTokens: 0 } satisfies MoonshotUsage,
+      model: DEFAULT_MOONSHOT_MODEL
+    };
   }
 }
 
@@ -382,6 +409,11 @@ export function createThinkingHumanizer(input: {
   let lastSummary = "";
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inFlight = false;
+  const usageEntries: Array<{
+    stage: "snapshot" | "final_summary" | "transcript";
+    model: string;
+    usage: MoonshotUsage;
+  }> = [];
 
   async function flush() {
     if (inFlight) {
@@ -400,8 +432,13 @@ export function createThinkingHumanizer(input: {
         language
       });
       lastSummarizedRawThinking = snapshot;
-      lastSummary = summary;
-      input.onSummary(summary);
+      lastSummary = summary.text;
+      usageEntries.push({
+        stage: "snapshot",
+        model: summary.model,
+        usage: summary.usage
+      });
+      input.onSummary(summary.text);
     } finally {
       inFlight = false;
       if (latestRawThinking.trim() && latestRawThinking !== lastSummarizedRawThinking) {
@@ -439,15 +476,29 @@ export function createThinkingHumanizer(input: {
 
       const summary =
         latestRawThinking.trim() && latestRawThinking === lastSummarizedRawThinking
-          ? lastSummary
+          ? null
           : await summarizeThinkingSnapshot({
               rawThinking,
               language
             });
 
+      usageEntries.push({
+        stage: "transcript",
+        model: transcript.model,
+        usage: transcript.usage
+      });
+      if (summary) {
+        usageEntries.push({
+          stage: "final_summary",
+          model: summary.model,
+          usage: summary.usage
+        });
+      }
+
       return {
-        summary: summary || lastSummary || fallbackSummary(resolveLanguage(language)),
-        transcript
+        summary: summary?.text || lastSummary || fallbackSummary(resolveLanguage(language)),
+        transcript: transcript.text,
+        usageEntries: [...usageEntries]
       };
     }
   };
@@ -457,7 +508,7 @@ export async function assessGuardrailForInput(input: {
   content: string;
   messages: ChatMessage[];
   sessionTitle?: string;
-}): Promise<GuardrailAssessment> {
+}): Promise<GuardrailAssessment & { usage: MoonshotUsage; model: string }> {
   const transcript = input.messages
     .filter((message) => message.role === "user" || message.role === "assistant")
     .slice(-8)
@@ -481,13 +532,19 @@ export async function assessGuardrailForInput(input: {
       maxTokens: 220
     });
 
-    return parseGuardrailAssessment(reply);
+    return {
+      ...parseGuardrailAssessment(reply.text),
+      usage: reply.usage,
+      model: reply.model
+    };
   } catch {
     return {
       decision: "allow",
       category: "none",
       reason: "守卫模型暂时不可用，已按允许继续处理。",
-      confidence: 0
+      confidence: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+      model: DEFAULT_MOONSHOT_MODEL
     };
   }
 }

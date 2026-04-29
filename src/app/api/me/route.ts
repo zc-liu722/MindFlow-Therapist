@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
 
-import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
+import { errorResponse } from "@/lib/api-errors";
+import { toPublicUserBillingState } from "@/lib/billing";
+import type { UserPreferencesUpdateRequestBody } from "@/lib/api-types";
+import {
+  parseJsonBody
+} from "@/lib/api-route";
 import { jsonWithKey } from "@/lib/api-response";
-import { getCurrentUser } from "@/lib/auth";
+import { getCurrentUser, requireRole, updateUserPreferences } from "@/lib/auth";
 
-export const runtime = API_RUNTIME;
-export const dynamic = API_DYNAMIC;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -13,10 +18,30 @@ export async function GET() {
     return jsonWithKey("user", null);
   }
 
-  return jsonWithKey("user", {
-    id: user.id,
-    username: user.username,
-    displayName: user.displayName,
-    role: user.role
-  });
+  return jsonWithKey("user", toPublicUserBillingState(user));
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const user = await requireRole("user");
+    const body = await parseJsonBody<UserPreferencesUpdateRequestBody>(request);
+    const progressDisplay = body.progressDisplay;
+
+    if (
+      progressDisplay !== undefined &&
+      progressDisplay !== "show" &&
+      progressDisplay !== "minimal" &&
+      progressDisplay !== "hidden"
+    ) {
+      return NextResponse.json({ error: "进度条显示模式不合法" }, { status: 400 });
+    }
+
+    const updatedUser = await updateUserPreferences(user.id, {
+      progressDisplay
+    });
+
+    return jsonWithKey("user", toPublicUserBillingState(updatedUser));
+  } catch (error) {
+    return errorResponse(error, "用户设置更新失败", [{ match: "UNAUTHORIZED", status: 401 }], 400);
+  }
 }

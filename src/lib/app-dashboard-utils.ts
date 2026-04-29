@@ -3,6 +3,9 @@ import type {
   AppSessionRecord as SessionRecord,
   AppSupervisionRun as SupervisionRun
 } from "@/lib/app-dashboard-types";
+import { cleanInlineMarkdown, cleanMarkdownText } from "@/lib/text-utils";
+
+export { cleanInlineMarkdown, cleanMarkdownText };
 
 export type JournalBlock =
   | { type: "heading"; level: number; content: string }
@@ -24,35 +27,6 @@ export function formatSupervisionRole(role: ChatMessage["role"]) {
     return "来访者";
   }
   return "系统";
-}
-
-export function cleanMarkdownText(value: string) {
-  return value
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .replace(/__([^_]+)__/g, "$1")
-    .replace(/_([^_]+)_/g, "$1")
-    .replace(/^#{1,6}\s*/gm, "")
-    .replace(/^>\s*/gm, "")
-    .replace(/^[-*+]\s*/gm, "")
-    .replace(/^\d+\.\s*/gm, "")
-    .replace(/\r/g, "")
-    .trim();
-}
-
-export function cleanInlineMarkdown(value: string) {
-  return value
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .replace(/__([^_]+)__/g, "$1")
-    .replace(/_([^_]+)_/g, "$1")
-    .replace(/~~([^~]+)~~/g, "$1")
-    .trim();
 }
 
 export function parseJournalBlocks(content: string): JournalBlock[] {
@@ -209,4 +183,8 @@ export function formatStreamingThinkingLine(thinking?: string) {
 
 export function isStreamNearBottom(element: HTMLDivElement) {
   return element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+}
+
+export function isPageNearBottom() {
+  return document.documentElement.scrollHeight - window.scrollY - window.innerHeight < 96;
 }

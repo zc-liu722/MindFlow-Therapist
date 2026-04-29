@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 
-import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
 import { errorResponse } from "@/lib/api-errors";
 import type { LoginRequestBody } from "@/lib/api-types";
 import {
@@ -14,8 +13,8 @@ import { createAuthSession, loginUser } from "@/lib/auth";
 import { createId } from "@/lib/crypto";
 import { writeDb } from "@/lib/db";
 
-export const runtime = API_RUNTIME;
-export const dynamic = API_DYNAMIC;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
@@ -51,7 +50,8 @@ export async function POST(request: Request) {
       id: user.id,
       displayName: user.displayName,
       username: user.username,
-      role: user.role
+      role: user.role,
+      preferences: user.preferences
     });
   } catch (error) {
     return errorResponse(

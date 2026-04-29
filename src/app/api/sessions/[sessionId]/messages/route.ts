@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 
 import { requireRole } from "@/lib/auth";
-import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
 import {
   errorResponse,
   getErrorMessage,
@@ -14,12 +13,13 @@ import {
   requireTrimmedString
 } from "@/lib/api-route";
 import { AnthropicConfigError, AnthropicRequestError } from "@/lib/anthropic";
+import { createUsageLedgerEntry, logUsageLedgerEntries } from "@/lib/billing";
 import { appendMessageStream, getSessionForUser } from "@/lib/domain";
 import { enforceInputGuardrail } from "@/lib/guardrails";
 import { MoonshotConfigError, MoonshotRequestError } from "@/lib/moonshot";
 
-export const runtime = API_RUNTIME;
-export const dynamic = API_DYNAMIC;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function toSseEvent(event: string, payload: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
@@ -70,13 +70,23 @@ export async function POST(
 
     const session = await getSessionForUser(user.id, sessionId);
 
-    await enforceInputGuardrail({
+    const guardrail = await enforceInputGuardrail({
       user,
       sessionId,
       content,
       sessionTitle: session.title,
       messages: session.messages
     });
+    await logUsageLedgerEntries([
+      createUsageLedgerEntry({
+        userId: user.id,
+        provider: "moonshot",
+        model: guardrail.model,
+        featureKind: "guardrail",
+        usage: guardrail.usage,
+        sessionId
+      })
+    ]);
     const pageLanguage = request.headers.get("x-page-language");
 
     const encoder = new TextEncoder();

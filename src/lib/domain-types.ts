@@ -119,6 +119,14 @@ export type AdminOverviewResult = {
   completedSessions: number;
   supervisionRate: number;
   averageTurns: number;
+  billingSummary: {
+    freeUsers: number;
+    plusUsers: number;
+    activePlusUsers: number;
+    monthlySessionsConsumed: number;
+    monthlyUsageCostCny: number;
+    totalUsageCostCny: number;
+  };
   moderationSummary: ModerationSummary;
   riskDistribution: RiskDistribution;
   sessionsByDay: { date: string; count: number }[];

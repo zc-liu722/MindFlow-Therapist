@@ -11,6 +11,7 @@ import type {
   AppSessionRecord as SessionRecord,
   AppSupervisionRun as SupervisionRun
 } from "@/lib/app-dashboard-types";
+import { getSessionMessages } from "@/lib/app-dashboard-types";
 
 type DashboardDerivedStateInput = {
   sessions: SessionRecord[];
@@ -57,7 +58,12 @@ export function getDashboardDerivedState({
   const completedSessions = sessions.filter((session) => session.status === "completed");
   const selectedSupervisionRun =
     supervisionRuns.find((run) => run.id === selectedSupervisionRunId) ?? null;
-  const activeSessionProgress = activeSession ? estimateSessionProgress(activeSession) : null;
+  const activeSessionProgress = activeSession
+    ? estimateSessionProgress({
+        ...activeSession,
+        messages: getSessionMessages(activeSession)
+      })
+    : null;
   const sessionToCompleteProgress =
     sessionToComplete && activeSession?.id === sessionToComplete.id ? activeSessionProgress : null;
 
@@ -76,7 +82,7 @@ export function getDashboardDerivedState({
       ? resolveSessionForSupervisionRun(sessions, selectedSupervisionRun)
       : null,
     lastMessageIsStreaming: Boolean(
-      activeSession?.messages.at(-1)?.isStreaming && !activeSession?.messages.at(-1)?.streamingDone
+      activeSession?.streamingMessage?.isStreaming && !activeSession?.streamingMessage?.streamingDone
     ),
     activeSessionId: activeSession?.id,
     activeSessionPace: normalizeSessionPace(activeSession?.pace ?? DEFAULT_SESSION_PACE),

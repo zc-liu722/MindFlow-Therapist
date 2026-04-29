@@ -37,6 +37,8 @@ import type {
   AppSessionRecord as SessionRecord,
   AppSupervisionRun as SupervisionRun
 } from "@/lib/app-dashboard-types";
+import { hydrateAppSessionDetail } from "@/lib/app-dashboard-types";
+import type { SessionDetailResult } from "@/lib/domain-types";
 import type { DashboardViewMode } from "@/hooks/use-dashboard-ui-state";
 import type { SessionMode } from "@/lib/session-modes";
 
@@ -79,6 +81,7 @@ type UseSessionActionsOptions = {
   loadSessionDetail: (sessionId: string) => Promise<void>;
   loadSessions: (selectedId?: string) => Promise<void>;
   loadJournals: () => Promise<void>;
+  refreshViewer: () => Promise<void>;
 };
 
 function removePendingMessages(
@@ -92,10 +95,9 @@ function removePendingMessages(
 
   return {
     ...current,
-    messages: current.messages.filter(
-      (message) =>
-        message.id !== temporaryUserMessageId && message.id !== temporaryAssistantMessageId
-    ),
+    stableMessages: current.stableMessages.filter((message) => message.id !== temporaryUserMessageId),
+    streamingMessage:
+      current.streamingMessage?.id === temporaryAssistantMessageId ? null : current.streamingMessage,
     messageCount: Math.max(current.messageCount - 2, 0)
   };
 }
@@ -130,7 +132,8 @@ export function useSessionActions({
   markShouldStickToBottom,
   loadSessionDetail,
   loadSessions,
-  loadJournals
+  loadJournals,
+  refreshViewer
 }: UseSessionActionsOptions) {
   const [paceBusy, setPaceBusy] = useState(false);
 
@@ -208,7 +211,7 @@ export function useSessionActions({
       });
       const payloadResponse = response.clone();
       const session = response.ok
-        ? await readKeyedResponse<"session", SessionDetail>(payloadResponse, "session")
+        ? await readKeyedResponse<"session", SessionDetailResult>(payloadResponse, "session")
         : null;
       const payload = response.ok ? null : await readJsonResponse<ApiErrorPayload>(response);
 
@@ -223,7 +226,7 @@ export function useSessionActions({
         return;
       }
 
-      setActiveSession(session);
+      setActiveSession(hydrateAppSessionDetail(session));
       setSessions((current) =>
         current.map((item) =>
           item.id === session.id
@@ -283,7 +286,8 @@ export function useSessionActions({
       current
         ? {
             ...current,
-            messages: [...current.messages, pendingUserMessage, temporaryAssistantMessage],
+            stableMessages: [...current.stableMessages, pendingUserMessage],
+            streamingMessage: temporaryAssistantMessage,
             messageCount: current.messageCount + 2,
             updatedAt: temporaryAssistantMessage.createdAt
           }
@@ -391,23 +395,23 @@ export function useSessionActions({
         current
           ? {
               ...current,
-              messages: current.messages.map((message): ChatMessage => {
-                if (message.id === temporaryUserMessage.id) {
-                  return { ...userMessage, animateIn: message.animateIn };
+              stableMessages: [
+                ...current.stableMessages.map((message): ChatMessage =>
+                  message.id === temporaryUserMessage.id
+                    ? { ...userMessage, animateIn: message.animateIn }
+                    : message
+                ),
+                {
+                  ...assistantMessage,
+                  animateIn: current.streamingMessage?.animateIn,
+                  content: assistantMessage.content || current.streamingMessage?.content || "",
+                  thinking: assistantMessage.thinking ?? current.streamingMessage?.thinking,
+                  rawThinking: assistantMessage.rawThinking,
+                  isStreaming: false,
+                  streamingDone: false
                 }
-                if (message.id === temporaryAssistantMessage.id) {
-                  return {
-                    ...assistantMessage,
-                    animateIn: message.animateIn,
-                    content: assistantMessage.content || message.content,
-                    thinking: assistantMessage.thinking ?? message.thinking,
-                    rawThinking: assistantMessage.rawThinking,
-                    isStreaming: false,
-                    streamingDone: false
-                  };
-                }
-                return message;
-              }),
+              ],
+              streamingMessage: null,
               updatedAt: assistantMessage.createdAt
             }
           : current
@@ -471,6 +475,7 @@ export function useSessionActions({
       setNotice(getCompleteSessionSuccessMessage(result ?? undefined));
       await loadSessions(targetSession.id);
       await loadJournals();
+      await refreshViewer();
     } catch {
       setNotice("结束会谈时出现异常，请稍后重试。");
     } finally {
@@ -480,6 +485,7 @@ export function useSessionActions({
     busy,
     loadJournals,
     loadSessions,
+    refreshViewer,
     sessionToComplete,
     setBusy,
     setNotice,

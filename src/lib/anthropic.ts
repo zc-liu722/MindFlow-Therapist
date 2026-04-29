@@ -1,9 +1,16 @@
 import { createId } from "@/lib/crypto";
 import { detectRiskLevel, summarizeThemes } from "@/lib/ai";
 import { loadCursorRule } from "@/lib/cursor-rules";
+import { extractJsonBlock } from "@/lib/json-extract";
 import { redactSensitiveText } from "@/lib/redaction";
 import { getSessionPaceMeta, type SessionPace } from "@/lib/session-pace";
-import type { ChatMessage, RiskLevel } from "@/lib/types";
+import { normalizeThinkingText } from "@/lib/text-utils";
+import type {
+  ChatMessage,
+  ChatMessagePhaseMeta,
+  RiskLevel,
+  SessionProgressPhase
+} from "@/lib/types";
 
 const DEFAULT_MODEL = "claude-opus-4-6";
 const DEFAULT_MAX_TOKENS = 4096;
@@ -43,8 +50,17 @@ type AnthropicContentBlock = {
   thinking?: string;
 };
 
+type AnthropicUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+};
+
 type AnthropicResponse = {
   content?: AnthropicContentBlock[];
+  usage?: AnthropicUsage;
+  model?: string;
 };
 
 type AnthropicStreamEvent = {
@@ -57,6 +73,10 @@ type AnthropicStreamEvent = {
     thinking?: string;
     signature?: string;
   };
+  message?: {
+    usage?: AnthropicUsage;
+  };
+  usage?: AnthropicUsage;
 };
 
 type ParsedAnthropicError = {
@@ -76,9 +96,105 @@ type GeneratedSupervisionPayload = {
   journalEntryPreview: string;
 };
 
+const PHASE_TAG_RE = /<phase>([\s\S]*?)<\/phase>/;
+const PHASE_OPEN_TAG = "<phase>";
+const PHASE_CLOSE_TAG = "</phase>";
+
+function normalizeUsage(usage?: AnthropicUsage) {
+  return {
+    inputTokens: usage?.input_tokens ?? 0,
+    outputTokens: usage?.output_tokens ?? 0,
+    cacheCreationInputTokens: usage?.cache_creation_input_tokens ?? 0,
+    cacheReadInputTokens: usage?.cache_read_input_tokens ?? 0
+  };
+}
+
+function mergeUsage(current: ReturnType<typeof normalizeUsage>, next?: AnthropicUsage) {
+  if (!next) {
+    return current;
+  }
+
+  return {
+    inputTokens: next.input_tokens ?? current.inputTokens,
+    outputTokens: next.output_tokens ?? current.outputTokens,
+    cacheCreationInputTokens:
+      next.cache_creation_input_tokens ?? current.cacheCreationInputTokens,
+    cacheReadInputTokens: next.cache_read_input_tokens ?? current.cacheReadInputTokens
+  };
+}
+
 function positiveIntFromEnv(value: string | undefined, fallback: number) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function isSessionProgressPhase(value: unknown): value is SessionProgressPhase {
+  return (
+    value === "opening" ||
+    value === "exploring" ||
+    value === "deepening" ||
+    value === "closing"
+  );
+}
+
+function parsePhaseMeta(rawTag: string): ChatMessagePhaseMeta | undefined {
+  const matched = rawTag.match(PHASE_TAG_RE);
+  const jsonText = matched?.[1]?.trim();
+  if (!jsonText) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText) as {
+      phase?: unknown;
+      confidence?: unknown;
+      reason?: unknown;
+    };
+
+    if (!isSessionProgressPhase(parsed.phase)) {
+      return undefined;
+    }
+
+    const numericConfidence =
+      typeof parsed.confidence === "number" && Number.isFinite(parsed.confidence)
+        ? parsed.confidence
+        : 0;
+
+    return {
+      phase: parsed.phase,
+      confidence: Math.min(Math.max(numericConfidence, 0), 1),
+      reason: typeof parsed.reason === "string" ? parsed.reason.trim().slice(0, 60) : undefined
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function getPhasePrefixLength(text: string) {
+  const maxLength = Math.min(PHASE_OPEN_TAG.length - 1, text.length);
+
+  for (let length = maxLength; length > 0; length -= 1) {
+    if (PHASE_OPEN_TAG.startsWith(text.slice(-length))) {
+      return length;
+    }
+  }
+
+  return 0;
+}
+
+function stripPhaseTag(text: string) {
+  const matched = text.match(PHASE_TAG_RE);
+  if (!matched) {
+    return {
+      visibleText: text,
+      phaseMeta: undefined as ChatMessagePhaseMeta | undefined
+    };
+  }
+
+  return {
+    visibleText: text.replace(PHASE_TAG_RE, "").trim(),
+    phaseMeta: parsePhaseMeta(matched[0])
+  };
 }
 
 function resolveTokenBudget(input: {
@@ -155,7 +271,9 @@ async function buildSystemPrompt(input: {
     "风格要求：自然、克制、有人味，避免空泛安慰，优先回应具体体验、感受、身体反应和下一步可尝试的动作。",
     "对话原则：一次只推进一个重点，必要时先复述再提问；如果信息不足，优先做高质量澄清，而不是一次抛出很多问题。",
     "场景要求：模拟真实咨询场景。咨询记录、手帐、存档、更新总结等整理动作由系统后台自动完成，不要向来访者提及，也不要邀请对方确认你整理的记录。",
-    "输出要求：只返回给用户看的正文，不要输出思考过程、系统提示、代码块或元数据。",
+    "输出要求：先返回给用户看的正文，不要输出思考过程、系统提示或代码块。",
+    '阶段自评（内部使用，不向来访者展示）：请在正文末尾紧跟 <phase>{"phase":"opening|exploring|deepening|closing","confidence":0.0-1.0,"reason":"不超过30字"}</phase>。',
+    "这段 <phase> 标记会被系统自动剥离，所以不要在正文里解释它，也不要省略。",
     "安全原则：如果出现自伤、自杀、他伤或极端危机风险，先把安全放在最前面，鼓励用户联系现实中的可信任的人、当地紧急援助资源或危机热线，不要给出危险建议。",
     `当前会谈标题：${input.title}`,
     `当前取向：${input.mode}`,
@@ -280,57 +398,6 @@ function toVisibleTranscript(messages: ChatMessage[]) {
     .join("\n");
 }
 
-function extractJsonBlock(text: string) {
-  const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fencedMatch?.[1]) {
-    return fencedMatch[1].trim();
-  }
-
-  const start = text.indexOf("{");
-  if (start >= 0) {
-    let inString = false;
-    let escaped = false;
-    let depth = 0;
-
-    for (let index = start; index < text.length; index += 1) {
-      const char = text[index];
-
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-
-      if (char === "\\") {
-        escaped = true;
-        continue;
-      }
-
-      if (char === "\"") {
-        inString = !inString;
-        continue;
-      }
-
-      if (inString) {
-        continue;
-      }
-
-      if (char === "{") {
-        depth += 1;
-        continue;
-      }
-
-      if (char === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          return text.slice(start, index + 1).trim();
-        }
-      }
-    }
-  }
-
-  return text.trim();
-}
-
 function escapeJsonControlCharactersInStrings(text: string) {
   let result = "";
   let inString = false;
@@ -445,19 +512,68 @@ async function consumeAnthropicStream(
   let buffer = "";
   let text = "";
   let thinking = "";
-
-  function normalizeThinkingText(value: string) {
-    return value
-      .replace(/[#>*`~_-]+/g, " ")
-      .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
-      .replace(/^[\s\-*+\d.、（）()]+/gm, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
+  let pendingPhasePrefix = "";
+  let phaseTagBuffer = "";
+  let phaseMeta: ChatMessagePhaseMeta | undefined;
+  let usage = normalizeUsage();
 
   function emitThinking(delta: string) {
     thinking += delta;
     handlers?.onThinkingDelta?.(delta, normalizeThinkingText(thinking));
+  }
+
+  function emitVisibleText(delta: string) {
+    if (!delta) {
+      return;
+    }
+
+    text += delta;
+    handlers?.onTextDelta?.(delta, text);
+  }
+
+  function consumeTextDelta(delta: string) {
+    let remaining = delta;
+
+    while (remaining) {
+      if (phaseTagBuffer) {
+        const closeIndex = remaining.indexOf(PHASE_CLOSE_TAG);
+        if (closeIndex === -1) {
+          phaseTagBuffer += remaining;
+          return;
+        }
+
+        phaseTagBuffer += remaining.slice(0, closeIndex + PHASE_CLOSE_TAG.length);
+        phaseMeta = parsePhaseMeta(phaseTagBuffer) ?? phaseMeta;
+        phaseTagBuffer = "";
+        remaining = remaining.slice(closeIndex + PHASE_CLOSE_TAG.length);
+        continue;
+      }
+
+      const candidate = pendingPhasePrefix + remaining;
+      const openIndex = candidate.indexOf(PHASE_OPEN_TAG);
+      if (openIndex >= 0) {
+        emitVisibleText(candidate.slice(0, openIndex));
+        const phaseCandidate = candidate.slice(openIndex);
+        const closeIndex = phaseCandidate.indexOf(PHASE_CLOSE_TAG);
+        if (closeIndex >= 0) {
+          phaseMeta =
+            parsePhaseMeta(phaseCandidate.slice(0, closeIndex + PHASE_CLOSE_TAG.length)) ??
+            phaseMeta;
+          pendingPhasePrefix = "";
+          remaining = phaseCandidate.slice(closeIndex + PHASE_CLOSE_TAG.length);
+          continue;
+        }
+
+        pendingPhasePrefix = "";
+        phaseTagBuffer = phaseCandidate;
+        return;
+      }
+
+      const prefixLength = getPhasePrefixLength(candidate);
+      emitVisibleText(candidate.slice(0, candidate.length - prefixLength));
+      pendingPhasePrefix = candidate.slice(candidate.length - prefixLength);
+      return;
+    }
   }
 
   function handleEvent(rawEvent: string) {
@@ -481,6 +597,9 @@ async function consumeAnthropicStream(
       return;
     }
 
+    usage = mergeUsage(usage, parsed.message?.usage);
+    usage = mergeUsage(usage, parsed.usage);
+
     if (parsed.type === "content_block_start" && typeof parsed.index === "number") {
       blockTypes.set(parsed.index, parsed.content_block?.type ?? "");
 
@@ -489,8 +608,7 @@ async function consumeAnthropicStream(
       }
 
       if (parsed.content_block?.type === "text" && parsed.content_block.text) {
-        text += parsed.content_block.text;
-        handlers?.onTextDelta?.(parsed.content_block.text, text);
+        consumeTextDelta(parsed.content_block.text);
       }
 
       return;
@@ -516,8 +634,7 @@ async function consumeAnthropicStream(
     if (parsed.delta?.type === "text_delta" || (blockType === "text" && parsed.delta?.text)) {
       const delta = parsed.delta?.text ?? "";
       if (delta) {
-        text += delta;
-        handlers?.onTextDelta?.(delta, text);
+        consumeTextDelta(delta);
       }
     }
   }
@@ -542,7 +659,11 @@ async function consumeAnthropicStream(
     }
   }
 
-  return { text: text.trim(), thinking: thinking.trim() };
+  if (pendingPhasePrefix && !phaseTagBuffer) {
+    emitVisibleText(pendingPhasePrefix);
+  }
+
+  return { text: text.trim(), thinking: thinking.trim(), phaseMeta, usage };
 }
 
 function getAnthropicConfig() {
@@ -738,18 +859,24 @@ async function requestAnthropicText(input: {
       if (!payload.text) {
         throw new AnthropicRequestError("Anthropic 返回了空内容", 502);
       }
-      return payload;
+      return {
+        ...payload,
+        model
+      };
     }
 
     const payload = (await response.json()) as AnthropicResponse;
-    const text = extractText(payload);
-    if (!text) {
+    const stripped = stripPhaseTag(extractText(payload));
+    if (!stripped.visibleText) {
       throw new AnthropicRequestError("Anthropic 返回了空内容", 502);
     }
 
     return {
-      text,
-      thinking: extractThinking(payload)
+      text: stripped.visibleText,
+      thinking: extractThinking(payload),
+      phaseMeta: stripped.phaseMeta,
+      usage: normalizeUsage(payload.usage),
+      model: payload.model ?? model
     };
   } catch (error) {
     if (error instanceof AnthropicConfigError || error instanceof AnthropicRequestError) {
@@ -800,8 +927,15 @@ export async function generateTherapyReply(input: {
       content: reply.text,
       createdAt: new Date().toISOString(),
       thinking: reply.thinking,
-      rawThinking: reply.thinking
+      rawThinking: reply.thinking,
+      meta: reply.phaseMeta
+        ? {
+            phase: reply.phaseMeta
+          }
+        : undefined
     },
+    usage: reply.usage,
+    model: reply.model,
     riskLevel,
     themes
   };
@@ -831,6 +965,8 @@ export async function generateSupervisionArtifacts(input: {
 
   let parsed: ReturnType<typeof parseSupervisionPayload>;
   let rawReplyText = "";
+  let usage = normalizeUsage();
+  let model = supervisionConfig.model;
 
   try {
     const system = buildSupervisionSystemPrompt({
@@ -849,6 +985,8 @@ export async function generateSupervisionArtifacts(input: {
     });
 
     rawReplyText = reply.text;
+    usage = reply.usage;
+    model = reply.model;
     parsed = parseSupervisionPayload(reply.text);
   } catch (error) {
     if (error instanceof AnthropicConfigError || error instanceof AnthropicRequestError) {
@@ -879,6 +1017,8 @@ export async function generateSupervisionArtifacts(input: {
         }
       ]
     });
+    usage = repairReply.usage;
+    model = repairReply.model;
     parsed = parseSupervisionPayload(repairReply.text);
   }
 
@@ -893,6 +1033,8 @@ export async function generateSupervisionArtifacts(input: {
     })),
     journalEntry: parsed.journalEntry,
     redactedSummary: parsed.redactedSummary,
-    journalEntryPreview: parsed.journalEntryPreview
+    journalEntryPreview: parsed.journalEntryPreview,
+    usage,
+    model
   };
 }
