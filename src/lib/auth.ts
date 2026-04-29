@@ -2,10 +2,16 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { createId, createPasswordHash, createRandomToken, hashText } from "@/lib/crypto";
+import { ensureUserBillingState } from "@/lib/billing";
 import { readDb, writeDb } from "@/lib/db";
 import { assertUserAccountAvailable, getEffectiveModerationState, syncUserModerationState } from "@/lib/guardrails";
 import { assertRequiredConsents, CONSENT_VERSION, validateConsentInput } from "@/lib/privacy";
-import type { AuthSessionRecord, Role, UserRecord } from "@/lib/types";
+import type {
+  AuthSessionRecord,
+  Role,
+  SessionProgressDisplay,
+  UserRecord
+} from "@/lib/types";
 
 const SESSION_COOKIE = "mt_session";
 const SESSION_DAYS = 14;
@@ -96,8 +102,12 @@ export async function registerUser(input: {
     consentVersion: CONSENT_VERSION,
     privacyConsentAt: consentAt,
     aiProcessingConsentAt: consentAt,
+    preferences: {
+      progressDisplay: "show"
+    },
     createdAt: new Date().toISOString()
   };
+  ensureUserBillingState(user);
 
   await writeDb((draft) => {
     draft.users.push(user);
@@ -268,6 +278,34 @@ export async function getCurrentUser() {
   }
 
   return resolvedUser;
+}
+
+export async function updateUserPreferences(
+  userId: string,
+  input: {
+    progressDisplay?: SessionProgressDisplay;
+  }
+) {
+  let nextUser: UserRecord | undefined;
+
+  await writeDb((draft) => {
+    const user = draft.users.find((item) => item.id === userId);
+    if (!user) {
+      return;
+    }
+
+    user.preferences = {
+      ...user.preferences,
+      ...(input.progressDisplay ? { progressDisplay: input.progressDisplay } : {})
+    };
+    nextUser = { ...user };
+  });
+
+  if (!nextUser) {
+    throw new Error("UNAUTHORIZED");
+  }
+
+  return nextUser;
 }
 
 export async function requireUser() {

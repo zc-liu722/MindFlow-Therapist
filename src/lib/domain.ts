@@ -1,5 +1,11 @@
 import { decryptForUser, encryptForUser, createId } from "@/lib/crypto";
 import {
+  assertCanStartSession,
+  consumeCompletedSessionQuota,
+  createUsageLedgerEntry,
+  logUsageLedgerEntries
+} from "@/lib/billing";
+import {
   preloadModeRules,
   preloadTherapistCoreRule
 } from "@/lib/cursor-rules";
@@ -185,6 +191,7 @@ export async function createSession(
   user: UserRecord,
   input: { title: string; mode: string; pace?: string; autoSupervision?: boolean }
 ): Promise<SessionCreateResult> {
+  assertCanStartSession(user);
   const normalizedMode = normalizeSessionMode(input.mode);
   const normalizedPace = normalizeSessionPace(input.pace);
   const autoSupervision = input.autoSupervision ?? true;
@@ -206,7 +213,6 @@ export async function createSession(
     supervisionJournal,
     modeRuleBodies: modeRules.map((rule) => rule.body)
   });
-  const initialMessages = [...contextMessages];
   const now = new Date().toISOString();
 
   const session: TherapySessionRecord = {
@@ -225,7 +231,7 @@ export async function createSession(
       : "已加载规则与历史上下文，等待来访者开始。",
     messageCount: 0,
     riskLevel: "low",
-    transcript: encryptForUser(user.id, JSON.stringify(initialMessages))
+    transcript: encryptForUser(user.id, JSON.stringify(contextMessages))
   };
 
   await writeDb((draft) => {
@@ -529,6 +535,28 @@ export async function appendMessageStream(
     },
     sessionId
   );
+  await logUsageLedgerEntries([
+    createUsageLedgerEntry({
+      userId: user.id,
+      provider: "anthropic",
+      model: assistantOutput.model,
+      featureKind: "chat",
+      usage: assistantOutput.usage,
+      sessionId,
+      messageId: assistantMessage.id
+    }),
+    ...humanizedThinking.usageEntries.map((entry) =>
+      createUsageLedgerEntry({
+        userId: user.id,
+        provider: "moonshot",
+        model: entry.model,
+        featureKind: "thinking_humanizer",
+        usage: entry.usage,
+        sessionId,
+        messageId: assistantMessage.id
+      })
+    )
+  ]);
 
   return {
     userMessage,
@@ -652,6 +680,15 @@ export async function completeSession(
 
     let supervisionRun: SupervisionRunRecord | undefined;
     let supervisionJournal: SupervisionJournalRecord | undefined;
+    let supervisionUsage:
+      | {
+          inputTokens: number;
+          outputTokens: number;
+          cacheCreationInputTokens?: number;
+          cacheReadInputTokens?: number;
+        }
+      | undefined;
+    let supervisionModel: string | undefined;
     let supervisionFailed = false;
     let supervisionFailureReason: string | undefined;
     let alreadyCompleted = false;
@@ -668,6 +705,8 @@ export async function completeSession(
             ? decryptForUser(user.id, supervisionJournalExisting.content)
             : null
         });
+        supervisionUsage = supervisionOutput.usage;
+        supervisionModel = supervisionOutput.model;
         const supervisionArtifacts = buildSupervisionRecords({
           userId: user.id,
           session,
@@ -712,6 +751,16 @@ export async function completeSession(
       if (mutableSession.completionLockId !== completionLock.lockId) {
         return;
       }
+
+      const mutableUser = draft.users.find((item) => item.id === user.id);
+      if (!mutableUser) {
+        return;
+      }
+
+      consumeCompletedSessionQuota({
+        user: mutableUser,
+        session: mutableSession
+      });
 
       mutableSession.status = "completed";
       mutableSession.completedAt = new Date().toISOString();
@@ -772,6 +821,19 @@ export async function completeSession(
     await logEvent(user, "session_completed", { autoSupervision: session.autoSupervision }, session.id);
     if (supervisionRun) {
       await logEvent(user, "supervision_completed", { sessionTitle: session.title }, session.id);
+    }
+    if (supervisionRun && supervisionUsage && supervisionModel) {
+      await logUsageLedgerEntries([
+        createUsageLedgerEntry({
+          userId: user.id,
+          provider: "anthropic",
+          model: supervisionModel,
+          featureKind: "supervision",
+          usage: supervisionUsage,
+          sessionId: session.id,
+          runId: supervisionRun.id
+        })
+      ]);
     }
 
     return {
@@ -867,6 +929,17 @@ export async function rerunSupervisionForSession(
   });
 
   await logEvent(user, "supervision_completed", { sessionTitle: session.title }, session.id);
+  await logUsageLedgerEntries([
+    createUsageLedgerEntry({
+      userId: user.id,
+      provider: "anthropic",
+      model: supervisionOutput.model,
+      featureKind: "supervision",
+      usage: supervisionOutput.usage,
+      sessionId: session.id,
+      runId: supervisionRun.id
+    })
+  ]);
 
   return {
     sessionId: session.id,

@@ -1,5 +1,4 @@
 import { requireRole } from "@/lib/auth";
-import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
 import { errorResponse } from "@/lib/api-errors";
 import type { SessionRouteContext } from "@/lib/api-types";
 import { applyUserRateLimit } from "@/lib/api-route";
@@ -7,8 +6,8 @@ import { okJson } from "@/lib/api-response";
 import { AnthropicConfigError, AnthropicRequestError } from "@/lib/anthropic";
 import { completeSession } from "@/lib/domain";
 
-export const runtime = API_RUNTIME;
-export const dynamic = API_DYNAMIC;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(
   request: Request,
@@ -30,6 +29,7 @@ export async function POST(
         { match: "RATE_LIMITED", status: 429 },
         { match: "NOT_FOUND", status: 404 },
         { match: "SESSION_COMPLETING", status: 409 },
+        { match: "PLAN_QUOTA_EXCEEDED", status: 402 },
         { match: ({ error: current }) => current instanceof AnthropicConfigError, status: 503 },
         {
           match: ({ error: current }) => current instanceof AnthropicRequestError,

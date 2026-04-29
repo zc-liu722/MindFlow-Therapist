@@ -152,7 +152,10 @@ export async function enforceInputGuardrail(input: {
       : null;
 
   if (!match) {
-    return;
+    return {
+      usage: assessment.usage,
+      model: assessment.model
+    };
   }
 
   let blockedMessage = "当前输入已被拦截。";

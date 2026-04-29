@@ -11,7 +11,8 @@ const AUTH_ERROR_MESSAGES = {
 
 const COMPLETE_SESSION_ERROR_MESSAGES = {
   SESSION_COMPLETING: "这段会谈正在收尾处理中，请稍等片刻后刷新查看状态。",
-  NOT_FOUND: "这段会谈不存在，可能已经被删除。"
+  NOT_FOUND: "这段会谈不存在，可能已经被删除。",
+  PLAN_QUOTA_EXCEEDED: "本月可用会谈额度已用完，暂时无法完成扣费归档。请先升级 Plus 或等待下个额度周期。"
 } satisfies ErrorMessageMap;
 
 const RERUN_SUPERVISION_ERROR_MESSAGES = {
@@ -20,7 +21,8 @@ const RERUN_SUPERVISION_ERROR_MESSAGES = {
 } satisfies ErrorMessageMap;
 
 const CREATE_SESSION_ERROR_MESSAGES = {
-  ACTIVE_SESSION_EXISTS: "你还有一段进行中的对话。先继续或结束当前对话，再开始新的会谈吧。"
+  ACTIVE_SESSION_EXISTS: "你还有一段进行中的对话。先继续或结束当前对话，再开始新的会谈吧。",
+  PLAN_QUOTA_EXCEEDED: "本月会谈额度已用完。升级 Plus 后可以继续开始新的会谈。"
 } satisfies ErrorMessageMap;
 
 export const DELETE_SESSION_SUCCESS_MESSAGE = "会谈已删除，对应记录与派生督导内容已同步清理。";

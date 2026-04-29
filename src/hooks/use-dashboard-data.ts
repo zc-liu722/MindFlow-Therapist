@@ -12,6 +12,8 @@ import type {
   AppSessionRecord as SessionRecord,
   AppSupervisionRun as SupervisionRun
 } from "@/lib/app-dashboard-types";
+import { hydrateAppSessionDetail } from "@/lib/app-dashboard-types";
+import type { SessionDetailResult } from "@/lib/domain-types";
 
 type UseDashboardDataOptions = {
   setNotice: (value: string) => void;
@@ -32,7 +34,7 @@ export function useDashboardData({ setNotice }: UseDashboardDataOptions) {
     sessionRequestRef.current = requestId;
 
     const response = await fetch(`/api/sessions/${sessionId}`);
-    const session = await readKeyedResponse<"session", SessionDetail>(response, "session");
+    const session = await readKeyedResponse<"session", SessionDetailResult>(response, "session");
 
     if (!response.ok || !session) {
       setNotice("会谈内容加载失败");
@@ -43,7 +45,7 @@ export function useDashboardData({ setNotice }: UseDashboardDataOptions) {
     }
 
     setSelectedSessionId(session.id);
-    setActiveSession(session);
+    setActiveSession(hydrateAppSessionDetail(session));
   }, [setNotice]);
 
   const loadSessions = useCallback(async (selectedId?: string) => {

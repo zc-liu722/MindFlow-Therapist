@@ -2,11 +2,12 @@
 
 import {
   type KeyboardEvent,
-  type UIEvent,
   type MouseEvent,
+  type PointerEvent,
   type ReactNode,
   memo,
   useEffect,
+  useRef,
   useState
 } from "react";
 import { createPortal } from "react-dom";
@@ -28,7 +29,6 @@ import {
   formatSupervisionRole,
   formatSupervisionTitle,
   getNextSessionTitle,
-  isStreamNearBottom,
   parseJournalBlocks,
   parseSupervisionArticle,
   resolveSessionForSupervisionRun
@@ -36,9 +36,14 @@ import {
 import { formatDateOnly, formatDateTime } from "@/lib/date-format";
 import { getDashboardDerivedState } from "@/lib/app-dashboard-selectors";
 import { ACTIVE_SESSION_EXISTS_MESSAGE } from "@/lib/client-errors";
+import { readJsonResponse, resolveApiErrorMessage } from "@/lib/client-response";
 import type {
   AppChatMessage as ChatMessage,
   AppViewerUser as User
+} from "@/lib/app-dashboard-types";
+import {
+  getLastSessionMessage,
+  normalizeProgressDisplay
 } from "@/lib/app-dashboard-types";
 import {
   DEFAULT_SESSION_MODE,
@@ -50,8 +55,25 @@ import {
   SESSION_PACE_CATALOG,
   type SessionPace
 } from "@/lib/session-pace";
+import type {
+  ApiErrorPayload,
+  BillingCheckoutPayload,
+  UserPayload,
+  UserPreferencesUpdateRequestBody
+} from "@/lib/api-types";
+import type { SessionProgressDisplay } from "@/lib/types";
 
 const THEME_STORAGE_KEY = "mindflow-theme-preference";
+
+const PROGRESS_DISPLAY_OPTIONS: Array<{
+  value: SessionProgressDisplay;
+  label: string;
+  description: string;
+}> = [
+  { value: "show", label: "完整显示", description: "显示阶段、说明和百分比" },
+  { value: "minimal", label: "简洁显示", description: "只保留细线和阶段标签" },
+  { value: "hidden", label: "隐藏", description: "在当前界面不显示进度条" }
+];
 
 function JournalContent({ content }: { content: string }) {
   const blocks = parseJournalBlocks(content);
@@ -283,12 +305,13 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
 
   return (
     <div className={rowClassName}>
-      <article className={`${bubbleClassName}${message.animateIn ? " bubble-enter" : ""}`}>
+      <article
+        className={`${bubbleClassName}${message.animateIn ? " bubble-enter" : ""} ${
+          message.isStreaming ? "bubble-streaming" : "bubble-stable"
+        }`}
+      >
         {message.role === "assistant" && message.isStreaming && !message.streamingDone ? (
           <>
-            <div className="bubble-head bubble-head-time-only">
-              <time>{formatDateTime(message.createdAt)}</time>
-            </div>
             <div className="thinking-panel">
               <div className="bubble-thinking bubble-thinking-live" aria-label="咨询师思考中">
                 <div className="thinking-dots" aria-hidden="true">
@@ -307,9 +330,6 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
           </>
         ) : message.content ? (
           <>
-            <div className="bubble-head bubble-head-time-only">
-              <time>{formatDateTime(message.createdAt)}</time>
-            </div>
             {message.role === "assistant" && message.rawThinking ? (
               <div className="thinking-panel">
                 <button
@@ -363,20 +383,22 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
 
 const MessageStreamView = memo(function MessageStreamView({
   expandedThinkingIds,
-  messages,
+  stableMessages,
+  streamingMessage,
   onScroll,
   onToggleThinking,
   streamRef
 }: {
   expandedThinkingIds: string[];
-  messages: ChatMessage[];
-  onScroll: (event: UIEvent<HTMLDivElement>) => void;
+  stableMessages: ChatMessage[];
+  streamingMessage: ChatMessage | null;
+  onScroll: () => void;
   onToggleThinking: (messageId: string) => void;
   streamRef: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
     <div className="message-stream" ref={streamRef} onScroll={onScroll}>
-      {messages.map((message) => (
+      {stableMessages.map((message) => (
         <ChatMessageBubble
           expandedThinking={expandedThinkingIds.includes(message.id)}
           key={message.id}
@@ -384,30 +406,70 @@ const MessageStreamView = memo(function MessageStreamView({
           onToggleThinking={onToggleThinking}
         />
       ))}
+      {streamingMessage ? (
+        <ChatMessageBubble
+          expandedThinking={expandedThinkingIds.includes(streamingMessage.id)}
+          key={streamingMessage.id}
+          message={streamingMessage}
+          onToggleThinking={onToggleThinking}
+        />
+      ) : null}
     </div>
   );
 });
 
-function SessionProgressCard({ progress }: { progress: SessionProgress }) {
+function SessionProgressCard({
+  displayMode,
+  onPointerCancel,
+  onPointerDown,
+  onPointerLeave,
+  onPointerUp,
+  onContextMenu,
+  progress
+}: {
+  displayMode: SessionProgressDisplay;
+  onPointerCancel: () => void;
+  onPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
+  onPointerLeave: () => void;
+  onPointerUp: () => void;
+  onContextMenu: (event: MouseEvent<HTMLDivElement>) => void;
+  progress: SessionProgress;
+}) {
+  const minimal = displayMode === "minimal";
+
   return (
-    <div aria-label={`会谈进度 ${progress.percent}%`} className="session-progress-card">
-      <div
-        className={`session-progress-meta${
-          progress.phase === "completed" ? " is-completed" : ""
-        }`}
-      >
-        {progress.phase === "completed" ? (
-          <>
-            <strong>{progress.phaseLabel}</strong>
-            <p>{progress.summary}</p>
-          </>
-        ) : (
-          <div>
-            <strong>{progress.phaseLabel}</strong>
-            <p>{progress.summary}</p>
-          </div>
-        )}
-      </div>
+    <div
+      aria-label={minimal ? `会谈阶段 ${progress.phaseLabel}` : `会谈进度 ${progress.percent}%`}
+      className={`session-progress-card${minimal ? " is-minimal" : ""}`}
+      onContextMenu={onContextMenu}
+      onPointerCancel={onPointerCancel}
+      onPointerDown={onPointerDown}
+      onPointerLeave={onPointerLeave}
+      onPointerUp={onPointerUp}
+    >
+      {minimal ? (
+        <div className="session-progress-minimal-head">
+          <strong>{progress.phaseLabel}</strong>
+        </div>
+      ) : (
+        <div
+          className={`session-progress-meta${
+            progress.phase === "completed" ? " is-completed" : ""
+          }`}
+        >
+          {progress.phase === "completed" ? (
+            <>
+              <strong>{progress.phaseLabel}</strong>
+              <p>{progress.summary}</p>
+            </>
+          ) : (
+            <div>
+              <strong>{progress.phaseLabel}</strong>
+              <p>{progress.summary}</p>
+            </div>
+          )}
+        </div>
+      )}
       <div
         aria-valuemax={100}
         aria-valuemin={0}
@@ -417,16 +479,19 @@ function SessionProgressCard({ progress }: { progress: SessionProgress }) {
       >
         <span className="session-progress-fill" style={{ width: `${progress.percent}%` }} />
       </div>
-      <div className="session-progress-foot">
-        <span className="session-progress-detail">{progress.detailLabel}</span>
-        <span className="session-progress-percent">{progress.percent}%</span>
-      </div>
+      {minimal ? null : (
+        <div className="session-progress-foot">
+          <span className="session-progress-detail">{progress.detailLabel}</span>
+          <span className="session-progress-percent">{progress.percent}%</span>
+        </div>
+      )}
     </div>
   );
 }
 
 export function AppDashboard({ user }: { user: User }) {
   const router = useRouter();
+  const [viewer, setViewer] = useState(user);
   const [draftTitle, setDraftTitle] = useState("第1次会谈");
   const [draftMode, setDraftMode] = useState<SessionMode>(DEFAULT_SESSION_MODE);
   const [autoSupervision, setAutoSupervision] = useState(true);
@@ -434,7 +499,13 @@ export function AppDashboard({ user }: { user: User }) {
   const [isComposerComposing, setIsComposerComposing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [billingBusy, setBillingBusy] = useState(false);
   const [activeSessionReminderOpen, setActiveSessionReminderOpen] = useState(false);
+  const [progressDisplay, setProgressDisplay] = useState<SessionProgressDisplay>(
+    normalizeProgressDisplay(user.preferences?.progressDisplay)
+  );
+  const [progressDisplayPopoverOpen, setProgressDisplayPopoverOpen] = useState(false);
+  const progressLongPressTimerRef = useRef<number | null>(null);
   const {
     sessions,
     setSessions,
@@ -498,9 +569,70 @@ export function AppDashboard({ user }: { user: User }) {
     selectedSupervisionRunId,
     sessionToComplete
   });
-  const progressCard = activeSessionProgress ? (
-    <SessionProgressCard progress={activeSessionProgress} />
-  ) : null;
+  const lastSessionMessage = getLastSessionMessage(activeSession);
+  const progressCardVisible = Boolean(activeSessionProgress && progressDisplay !== "hidden");
+
+  function clearProgressLongPressTimer() {
+    if (progressLongPressTimerRef.current !== null) {
+      window.clearTimeout(progressLongPressTimerRef.current);
+      progressLongPressTimerRef.current = null;
+    }
+  }
+
+  function handleProgressPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+    clearProgressLongPressTimer();
+    progressLongPressTimerRef.current = window.setTimeout(() => {
+      setProgressDisplayPopoverOpen(true);
+      progressLongPressTimerRef.current = null;
+    }, 420);
+  }
+
+  async function updateProgressDisplay(nextDisplay: SessionProgressDisplay) {
+    const previousDisplay = progressDisplay;
+    setProgressDisplay(nextDisplay);
+    setProgressDisplayPopoverOpen(false);
+
+    try {
+      const response = await fetch("/api/me", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          progressDisplay: nextDisplay
+        } satisfies UserPreferencesUpdateRequestBody)
+      });
+
+      if (!response.ok) {
+        const payload = await readJsonResponse<ApiErrorPayload>(response);
+        setProgressDisplay(previousDisplay);
+        setNotice(resolveApiErrorMessage(payload, "进度条显示设置保存失败"));
+      } else {
+        await refreshViewer();
+      }
+    } catch {
+      setProgressDisplay(previousDisplay);
+      setNotice("进度条显示设置保存失败");
+    }
+  }
+
+  const progressCard =
+    activeSessionProgress && progressCardVisible ? (
+      <SessionProgressCard
+        displayMode={progressDisplay}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          clearProgressLongPressTimer();
+          setProgressDisplayPopoverOpen(true);
+        }}
+        onPointerCancel={clearProgressLongPressTimer}
+        onPointerDown={handleProgressPointerDown}
+        onPointerLeave={clearProgressLongPressTimer}
+        onPointerUp={clearProgressLongPressTimer}
+        progress={activeSessionProgress}
+      />
+    ) : null;
   const {
     streamRef,
     composerTextareaRef,
@@ -518,10 +650,10 @@ export function AppDashboard({ user }: { user: User }) {
   } = useDashboardChatUi({
     activeSessionId,
     activeSessionStatus: activeSession?.status,
-    activeSessionProgressPercent: activeSessionProgress?.percent,
+    activeSessionProgressPercent: progressCardVisible ? activeSessionProgress?.percent : undefined,
     busy,
-    lastMessageContent: activeSession?.messages.at(-1)?.content,
-    lastMessageThinking: activeSession?.messages.at(-1)?.thinking,
+    lastMessageContent: lastSessionMessage?.content,
+    lastMessageThinking: lastSessionMessage?.thinking,
     lastMessageIsStreaming,
     messageInput,
     setActiveSession,
@@ -536,12 +668,31 @@ export function AppDashboard({ user }: { user: User }) {
     }
   }, [createPanelOpen, sessions]);
 
+  const refreshViewer = async () => {
+    const response = await fetch("/api/me");
+    const payload = await readJsonResponse<UserPayload>(response);
+
+    if (!response.ok || !payload?.user) {
+      return;
+    }
+
+    setViewer(payload.user);
+  };
+
   useEffect(() => {
     if (notice === ACTIVE_SESSION_EXISTS_MESSAGE) {
       setActiveSessionReminderOpen(true);
       setNotice("");
     }
   }, [notice]);
+
+  useEffect(() => () => clearProgressLongPressTimer(), []);
+
+  useEffect(() => {
+    if (!progressCardVisible) {
+      setProgressDisplayPopoverOpen(false);
+    }
+  }, [progressCardVisible]);
 
   const {
     paceBusy,
@@ -584,8 +735,54 @@ export function AppDashboard({ user }: { user: User }) {
     markShouldStickToBottom,
     loadSessionDetail,
     loadSessions,
-    loadJournals
+      loadJournals,
+      refreshViewer
   });
+
+  async function startPlusCheckout() {
+    if (billingBusy) {
+      return;
+    }
+
+    setBillingBusy(true);
+    setNotice("");
+
+    try {
+      const response = await fetch("/api/billing/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: "plus" })
+      });
+      const payload = await readJsonResponse<BillingCheckoutPayload | ApiErrorPayload>(response);
+
+      if (!response.ok || !payload || !("order" in payload) || !payload.order) {
+        setNotice(resolveApiErrorMessage(payload as ApiErrorPayload | null, "创建支付订单失败"));
+        return;
+      }
+
+      if (payload.order.checkoutUrl) {
+        window.open(payload.order.checkoutUrl, "_blank", "noopener,noreferrer");
+        setNotice("已创建微信支付订单，请在新窗口完成支付。支付成功后刷新页面即可看到套餐更新。");
+        return;
+      }
+
+      if (payload.order.checkoutCodeUrl) {
+        try {
+          await navigator.clipboard.writeText(payload.order.checkoutCodeUrl);
+          setNotice("已创建微信支付订单。二维码链接已复制到剪贴板，可用于生成扫码支付。");
+        } catch {
+          setNotice(`已创建微信支付订单，请使用微信扫码链接：${payload.order.checkoutCodeUrl}`);
+        }
+        return;
+      }
+
+      setNotice("支付订单已创建，但当前环境未返回可直接打开的支付链接。");
+    } catch {
+      setNotice("创建支付订单失败");
+    } finally {
+      setBillingBusy(false);
+    }
+  }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     const nativeEvent = event.nativeEvent;
@@ -737,12 +934,46 @@ export function AppDashboard({ user }: { user: User }) {
           <div className="studio-rail-panel">
             <div className="sidebar-topbar">
               <div className="sidebar-user">
-                <strong>{user.displayName}</strong>
-                <span>@{user.username}</span>
+                <strong>{viewer.displayName}</strong>
+                <span>@{viewer.username}</span>
               </div>
             </div>
 
             <div className="sidebar-scroll-area">
+              <section className="sidebar-settings" aria-label="套餐与额度">
+                <div className="sidebar-settings-head">
+                  <strong>套餐与额度</strong>
+                  <span>{viewer.plan === "plus" ? "已开通 Plus" : "当前为 Free"}</span>
+                </div>
+                <div className="sidebar-setting-group">
+                  <div className="sidebar-setting-copy">
+                    <strong>{viewer.plan === "plus" ? "Plus" : "Free"}</strong>
+                    <p>
+                      本周期剩余 {viewer.quota.remainingSessions} / {viewer.quota.monthlySessionLimit} 次会谈，
+                      截止 {formatDateOnly(viewer.quota.quotaPeriodEnd)}
+                    </p>
+                    {viewer.billing.planExpireAt ? (
+                      <p>Plus 有效期至 {formatDateOnly(viewer.billing.planExpireAt)}</p>
+                    ) : null}
+                  </div>
+                  {viewer.plan !== "plus" || !viewer.billing.isPlusActive ? (
+                    <div className="sidebar-setting-options" role="list">
+                      <button
+                        className="sidebar-setting-option is-active"
+                        disabled={billingBusy}
+                        onClick={() => {
+                          void startPlusCheckout();
+                        }}
+                        type="button"
+                      >
+                        <strong>{billingBusy ? "创建订单中..." : "升级到 Plus"}</strong>
+                        <span>微信支付开通更高会谈额度</span>
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+
               <nav className="mode-switch" aria-label="workspace sections">
                 {sessionTabs.map((item) => (
                   <button
@@ -762,6 +993,39 @@ export function AppDashboard({ user }: { user: User }) {
                   </button>
                 ))}
               </nav>
+
+              <section className="sidebar-settings" aria-label="会谈设置">
+                <div className="sidebar-settings-head">
+                  <strong>会谈设置</strong>
+                  <span>随时调整界面信息量</span>
+                </div>
+                <div className="sidebar-setting-group">
+                  <div className="sidebar-setting-copy">
+                    <strong>会话进度条</strong>
+                    <p>这是根据对话内容估算的阶段提示，仅供参考。</p>
+                  </div>
+                  <div className="sidebar-setting-options" role="list">
+                    {PROGRESS_DISPLAY_OPTIONS.map((option) => (
+                      <button
+                        aria-pressed={progressDisplay === option.value}
+                        className={
+                          progressDisplay === option.value
+                            ? "sidebar-setting-option is-active"
+                            : "sidebar-setting-option"
+                        }
+                        key={option.value}
+                        onClick={() => {
+                          void updateProgressDisplay(option.value);
+                        }}
+                        type="button"
+                      >
+                        <strong>{option.label}</strong>
+                        <span>{option.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
 
             </div>
 
@@ -811,13 +1075,44 @@ export function AppDashboard({ user }: { user: User }) {
                   <>
                     <div className="chat-stage-scroll-shell">
                       {progressCard ? (
-                        <div className="chat-stage-progress-overlay" ref={progressCardRef}>
-                          {progressCard}
+                        <div className="chat-stage-progress-overlay">
+                          <div ref={progressCardRef}>
+                            {progressCard}
+                          </div>
+                          {progressDisplayPopoverOpen ? (
+                            <div className="progress-display-popover" role="dialog" aria-label="会话进度条设置">
+                              <p className="progress-display-popover-title">会话进度条</p>
+                              <p className="progress-display-popover-copy">
+                                这是根据对话内容估算的阶段提示，仅供参考。
+                              </p>
+                              <div className="progress-display-popover-options" role="list">
+                                {PROGRESS_DISPLAY_OPTIONS.map((option) => (
+                                  <button
+                                    aria-pressed={progressDisplay === option.value}
+                                    className={
+                                      progressDisplay === option.value
+                                        ? "progress-display-option is-active"
+                                        : "progress-display-option"
+                                    }
+                                    key={option.value}
+                                    onClick={() => {
+                                      void updateProgressDisplay(option.value);
+                                    }}
+                                    type="button"
+                                  >
+                                    <strong>{option.label}</strong>
+                                    <span>{option.description}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                       <MessageStreamView
                         expandedThinkingIds={expandedThinkingIds}
-                        messages={activeSession.messages}
+                        stableMessages={activeSession.stableMessages}
+                        streamingMessage={activeSession.streamingMessage}
                         onScroll={handleStreamScroll}
                         onToggleThinking={toggleThinkingExpanded}
                         streamRef={streamRef}

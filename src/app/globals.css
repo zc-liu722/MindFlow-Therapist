@@ -79,7 +79,6 @@
   font-family: "Avenir Next", "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC",
     "Microsoft YaHei", sans-serif;
 }
-
 :root[data-theme="light"] {
   color-scheme: light;
   --bg: #fffaf8;
@@ -408,7 +407,7 @@ a {
   min-height: 100dvh;
   display: grid;
   place-items: center;
-  overflow: hidden;
+  overflow: visible;
   background:
     radial-gradient(circle at 14% 18%, rgba(255, 115, 198, 0.16), transparent 20rem),
     radial-gradient(circle at 82% 14%, rgba(117, 255, 216, 0.1), transparent 24rem),
@@ -1767,6 +1766,92 @@ a {
   font-size: 0.82rem;
 }
 
+.sidebar-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--surface-glass) 88%, transparent);
+}
+
+.sidebar-settings-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+}
+
+.sidebar-settings-head strong,
+.sidebar-setting-copy strong {
+  font-size: 0.9rem;
+}
+
+.sidebar-settings-head span,
+.sidebar-setting-copy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.sidebar-setting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sidebar-setting-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+}
+
+.sidebar-setting-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.sidebar-setting-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  width: 100%;
+  padding: 0.78rem 0.82rem;
+  border-radius: 14px;
+  color: inherit;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-setting-option span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.sidebar-setting-option.is-active {
+  border-color: rgba(255, 158, 191, 0.44);
+  background: rgba(255, 158, 191, 0.12);
+}
+
+:root[data-theme="light"] .sidebar-settings {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(201, 132, 165, 0.18);
+}
+
+:root[data-theme="light"] .sidebar-setting-option {
+  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(201, 132, 165, 0.16);
+}
+
+:root[data-theme="light"] .sidebar-setting-option.is-active {
+  border-color: rgba(201, 132, 165, 0.34);
+  background: rgba(238, 140, 183, 0.12);
+}
+
 .studio-identity h2 {
   margin: 0.45rem 0 0.25rem;
   font-family: "Canela", "Iowan Old Style", "Songti SC", "STSong", "Noto Serif SC", serif;
@@ -2280,7 +2365,7 @@ a {
   flex: 1;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
   border-radius: 32px;
   animation: view-stage-fade-in 420ms cubic-bezier(0.22, 1, 0.36, 1);
   transform-origin: 50% 0;
@@ -2293,10 +2378,8 @@ a {
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  height: 100%;
-  overflow-x: clip;
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  height: auto;
+  overflow: visible;
   padding-bottom: 0;
 }
 
@@ -2669,8 +2752,8 @@ a {
   flex-direction: column;
   gap: 0.75rem;
   width: min(100%, 960px);
-  height: calc(var(--visual-viewport-height) - 7.9rem);
-  min-height: 0;
+  height: auto;
+  min-height: calc(var(--visual-viewport-height) - 7.9rem);
   margin: 0 auto;
   padding: 0.1rem 1.1rem 0.55rem;
   background: transparent;
@@ -2721,7 +2804,7 @@ a {
 .app-shell.app-shell-chat-active .immersion-layout-full,
 .app-shell.app-shell-chat-active .chat-stage,
 .app-shell.app-shell-chat-active .chat-stage-scroll-shell {
-  height: 100%;
+  height: auto;
 }
 
 .app-shell.app-shell-chat-active .view-stage-chat,
@@ -2733,9 +2816,9 @@ a {
 .app-shell.app-shell-chat-active .view-stage-chat {
   --chat-toolbar-top: calc(env(safe-area-inset-top, 0px) + 0.9rem);
   --chat-toolbar-height: 2.8rem;
-  --chat-toolbar-offset: calc(env(safe-area-inset-top, 0px) + 5rem);
+  --chat-toolbar-offset: calc(var(--chat-toolbar-top) + var(--chat-toolbar-height) + 0.9rem);
   --chat-composer-gap: 1.2rem;
-  --chat-progress-gap: 0.6rem;
+  --chat-progress-gap: calc(var(--chat-toolbar-offset) + 0.2rem);
   border-radius: 0;
   background: transparent;
 }
@@ -2787,11 +2870,13 @@ a {
 
 .app-shell.app-shell-chat-active .chat-stage {
   flex: 1 1 auto;
-  height: auto;
+  height: 100%;
+  min-height: 100%;
   width: 100%;
   max-width: none;
   margin: 0;
   padding: 0;
+  overflow: hidden;
 }
 
 .chat-stage::before,
@@ -2898,8 +2983,7 @@ a {
 }
 
 .session-list {
-  overflow: auto;
-  overscroll-behavior-y: contain;
+  overflow: visible;
 }
 
 .session-item,
@@ -3005,7 +3089,6 @@ a {
   flex: 1;
   min-height: 0;
   height: 100%;
-  min-height: 22rem;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior-y: contain;
@@ -3085,6 +3168,10 @@ a {
   scroll-padding-top: calc(var(--chat-progress-gap, 0px) + var(--session-progress-height, 0px) + 1rem);
 }
 
+.app-shell.app-shell-chat-active .chat-stage-scroll-shell {
+  height: 100%;
+}
+
 .app-shell.app-shell-chat-active .message-stream > .message-stream-top-spacer + .message-row {
   margin-top: 0;
 }
@@ -3117,6 +3204,7 @@ a {
     box-shadow 220ms ease,
     border-color 220ms ease,
     background 220ms ease;
+  touch-action: manipulation;
 }
 
 :root[data-theme="light"] .session-progress-card {
@@ -3128,6 +3216,20 @@ a {
     inset 0 1px 0 rgba(255, 255, 255, 0.94),
     0 10px 18px -12px rgba(190, 136, 159, 0.14),
     0 24px 36px -28px rgba(197, 128, 160, 0.18);
+}
+
+.session-progress-card.is-minimal {
+  gap: 0.42rem;
+}
+
+.session-progress-minimal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.session-progress-minimal-head strong {
+  font-size: 0.84rem;
 }
 
 :root[data-theme="light"] .composer-input-shell {
@@ -3232,6 +3334,88 @@ a {
   transition: width 360ms ease;
 }
 
+.progress-display-popover {
+  position: absolute;
+  top: calc(100% + 0.55rem);
+  left: 0;
+  width: min(20rem, calc(100vw - 2rem));
+  padding: 0.9rem;
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(117, 255, 216, 0.06)),
+    color-mix(in srgb, var(--surface-elevated) 94%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(18px) saturate(1.08);
+  -webkit-backdrop-filter: blur(18px) saturate(1.08);
+  z-index: 12;
+}
+
+:root[data-theme="light"] .progress-display-popover {
+  background:
+    linear-gradient(135deg, rgba(255, 252, 255, 0.94), rgba(255, 236, 243, 0.88) 55%, rgba(255, 239, 225, 0.82)),
+    rgba(255, 255, 255, 0.92);
+  border-color: rgba(201, 132, 165, 0.24);
+}
+
+.progress-display-popover-title {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.progress-display-popover-copy {
+  margin: 0.38rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.progress-display-popover-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.82rem;
+}
+
+.progress-display-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.14rem;
+  width: 100%;
+  padding: 0.78rem 0.82rem;
+  border-radius: 14px;
+  color: inherit;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.progress-display-option strong {
+  font-size: 0.84rem;
+}
+
+.progress-display-option span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.progress-display-option.is-active {
+  border-color: rgba(255, 158, 191, 0.44);
+  background: rgba(255, 158, 191, 0.12);
+}
+
+:root[data-theme="light"] .progress-display-option {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(201, 132, 165, 0.16);
+}
+
+:root[data-theme="light"] .progress-display-option.is-active {
+  border-color: rgba(201, 132, 165, 0.34);
+  background: rgba(238, 140, 183, 0.12);
+}
+
 .bubble {
   position: relative;
   width: fit-content;
@@ -3247,6 +3431,11 @@ a {
   transform-origin: bottom center;
   overflow-wrap: anywhere;
   isolation: isolate;
+}
+
+.bubble-stable {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
 }
 
 .bubble::before {
@@ -3294,10 +3483,6 @@ a {
 .bubble-head time {
   color: var(--muted);
   opacity: 0.86;
-}
-
-.bubble-head-time-only {
-  margin-bottom: 0.34rem;
 }
 
 .bubble p {
@@ -4621,26 +4806,6 @@ a {
   color: color-mix(in srgb, var(--pink) 62%, var(--text));
 }
 
-@keyframes journalBorderSpin {
-  from {
-    transform: rotate(0deg);
-  }
-
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes journalAuraShift {
-  from {
-    transform: scale(1) translate3d(0, 0, 0);
-  }
-
-  to {
-    transform: scale(1.06) translate3d(0, -1.5%, 0);
-  }
-}
-
 .run-card {
   padding: 1rem 0;
   border-bottom: 1px solid var(--line);
@@ -4812,12 +4977,6 @@ a {
   .app-shell.app-shell-chat-active .view-stage-chat,
   .app-shell.app-shell-chat-active .immersion-layout-full {
     overflow: hidden;
-  }
-
-  .app-shell.app-shell-chat-active .app-grid,
-  .app-shell.app-shell-chat-active .experience-shell-full,
-  .app-shell.app-shell-chat-active .view-stage-chat,
-  .app-shell.app-shell-chat-active .immersion-layout-full {
     display: flex;
     flex-direction: column;
   }
@@ -5278,7 +5437,8 @@ a {
   }
 
   .chat-stage {
-    height: calc(var(--visual-viewport-height) - 8.1rem);
+    height: auto;
+    min-height: calc(var(--visual-viewport-height) - 8.1rem);
     padding: 0.12rem 0.8rem 0.35rem;
     border-radius: 26px;
   }
@@ -5777,5 +5937,86 @@ a {
   .bubble-enter,
   .session-progress-fill {
     animation: none !important;
+  }
+}
+
+/* ===== Mobile / low-power GPU budget =====
+ * 目标：在移动端（窄屏或触屏设备）关闭持续占用 GPU 的昂贵合成层，
+ * 避免长时间聊天时手机明显发烫、掉电过快。
+ * 影响的效果：大半径 backdrop-filter 毛玻璃、ambient orb 模糊层、
+ *   14s 无限循环的 surfaceAmbientShift 等装饰性动画，
+ *   这些在桌面端依然保留视觉效果。
+ */
+@media (max-width: 780px), (hover: none) and (pointer: coarse) {
+  .chat-stage,
+  .history-card,
+  .journal-card,
+  .runs-card,
+  .chat-stage::before,
+  .chat-stage::after,
+  .history-card::before,
+  .history-card::after,
+  .journal-card::before,
+  .journal-card::after,
+  .runs-card::before,
+  .runs-card::after,
+  .view-stage::before,
+  .view-stage::after {
+    animation: none !important;
+  }
+
+  .view-stage::before,
+  .view-stage::after {
+    display: none;
+  }
+
+  .app-shell::before,
+  .app-shell::after,
+  .admin-shell::before,
+  .admin-shell::after {
+    display: none;
+  }
+
+  .chat-stage,
+  .history-card,
+  .journal-card,
+  .runs-card,
+  .metric-card,
+  .chart-card,
+  .notice,
+  .auth-card,
+  .studio-rail-panel,
+  .pace-panel,
+  .chat-stage-toolbar,
+  .composer-input-shell,
+  .bubble,
+  .bubble.user,
+  .bubble.assistant,
+  .modal-panel,
+  .dialog-panel,
+  .signal-pill,
+  .main-create-button {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  .bubble,
+  .bubble.user,
+  .bubble.assistant {
+    box-shadow: 0 4px 12px rgba(7, 10, 18, 0.12);
+  }
+}
+
+/* 显式尊重用户的低功耗偏好（iOS Low Power Mode、Android 省电模式均会把它纳入判据）。 */
+@media (prefers-reduced-motion: reduce), (update: slow) {
+  .chat-stage,
+  .history-card,
+  .journal-card,
+  .runs-card,
+  .metric-card,
+  .chart-card,
+  .bubble {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
   }
 }

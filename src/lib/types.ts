@@ -8,7 +8,25 @@ export type SessionStatus = "active" | "completed";
 
 export type RiskLevel = "low" | "medium" | "high";
 
+export type SessionProgressPhase = "opening" | "exploring" | "deepening" | "closing";
+
+export type SessionProgressDisplay = "show" | "minimal" | "hidden";
+
 export type AccountStatus = "active" | "suspended" | "banned";
+
+export type BillingPlan = "free" | "plus";
+
+export type BillingOrderStatus = "pending" | "paid" | "failed" | "cancelled" | "expired";
+
+export type BillingProvider = "wechat";
+
+export type UsageLedgerProvider = "anthropic" | "moonshot";
+
+export type UsageLedgerFeatureKind =
+  | "chat"
+  | "supervision"
+  | "thinking_humanizer"
+  | "guardrail";
 
 export type ModerationCategory =
   | "prompt_attack"
@@ -33,6 +51,22 @@ export interface EncryptedBlob {
   tag: string;
 }
 
+export interface UserBillingState {
+  planStartedAt?: string;
+  planExpireAt?: string;
+  billingCycleAnchor?: string;
+  lastPaymentAt?: string;
+  wechatOpenId?: string;
+}
+
+export interface UserQuotaState {
+  monthlySessionLimit: number;
+  monthlySessionUsed: number;
+  quotaPeriodStart: string;
+  quotaPeriodEnd: string;
+  lastResetAt?: string;
+}
+
 export interface UserRecord {
   id: string;
   username: string;
@@ -44,7 +78,13 @@ export interface UserRecord {
   consentVersion?: string;
   privacyConsentAt?: string;
   aiProcessingConsentAt?: string;
+  plan?: BillingPlan;
+  billing?: UserBillingState;
+  quota?: UserQuotaState;
   moderation?: UserModerationState;
+  preferences?: {
+    progressDisplay?: SessionProgressDisplay;
+  };
   createdAt: string;
 }
 
@@ -56,6 +96,12 @@ export interface AuthSessionRecord {
   expiresAt: string;
 }
 
+export interface ChatMessagePhaseMeta {
+  phase: SessionProgressPhase;
+  confidence: number;
+  reason?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -63,6 +109,9 @@ export interface ChatMessage {
   createdAt: string;
   thinking?: string;
   rawThinking?: string;
+  meta?: {
+    phase?: ChatMessagePhaseMeta;
+  };
 }
 
 export interface TherapySessionRecord {
@@ -86,6 +135,9 @@ export interface TherapySessionRecord {
   supervisionFailedAt?: string;
   completionLockId?: string;
   completionLockAt?: string;
+  quotaChargedAt?: string;
+  quotaChargeId?: string;
+  billingPlanAtCompletion?: BillingPlan;
 }
 
 export interface TherapyJournalRecord {
@@ -146,6 +198,44 @@ export interface ModerationIncidentRecord {
   createdAt: string;
 }
 
+export interface BillingOrderRecord {
+  id: string;
+  userId: string;
+  provider: BillingProvider;
+  plan: BillingPlan;
+  status: BillingOrderStatus;
+  amountCny: number;
+  currency: "CNY";
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+  paidAt?: string;
+  expiredAt?: string;
+  checkoutUrl?: string;
+  checkoutCodeUrl?: string;
+  providerOrderId?: string;
+  providerTransactionId?: string;
+  notifyEventId?: string;
+  notifyPreview?: string;
+}
+
+export interface UsageLedgerRecord {
+  id: string;
+  userId: string;
+  provider: UsageLedgerProvider;
+  model: string;
+  featureKind: UsageLedgerFeatureKind;
+  createdAt: string;
+  sessionId?: string;
+  messageId?: string;
+  runId?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  estimatedCostCny: number;
+}
+
 export interface DatabaseShape {
   users: UserRecord[];
   authSessions: AuthSessionRecord[];
@@ -155,4 +245,6 @@ export interface DatabaseShape {
   supervisionJournals: SupervisionJournalRecord[];
   analyticsEvents: AnalyticsEventRecord[];
   moderationIncidents: ModerationIncidentRecord[];
+  billingOrders: BillingOrderRecord[];
+  usageLedger: UsageLedgerRecord[];
 }

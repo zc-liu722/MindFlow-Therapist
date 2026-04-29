@@ -61,6 +61,20 @@ export function AdminDashboard({ user }: { user: User }) {
           <strong>{overview?.moderationSummary.totalIncidents ?? "-"}</strong>
         </article>
         <article className="metric-card">
+          <span>Plus 用户</span>
+          <strong>{overview?.billingSummary.plusUsers ?? "-"}</strong>
+        </article>
+        <article className="metric-card">
+          <span>月度消耗会谈</span>
+          <strong>{overview?.billingSummary.monthlySessionsConsumed ?? "-"}</strong>
+        </article>
+        <article className="metric-card">
+          <span>本月模型成本</span>
+          <strong>
+            {overview ? `¥${overview.billingSummary.monthlyUsageCostCny.toFixed(2)}` : "-"}
+          </strong>
+        </article>
+        <article className="metric-card">
           <span>限制中账号</span>
           <strong>{overview?.moderationSummary.suspendedUsers ?? "-"}</strong>
         </article>
@@ -199,6 +213,30 @@ export function AdminDashboard({ user }: { user: User }) {
                 <strong>{item.count}</strong>
               </div>
             )) ?? <p className="muted">暂无数据</p>}
+          </div>
+        </article>
+
+        <article className="chart-card">
+          <h3>套餐与成本</h3>
+          <div className="mini-table">
+            <div className="mini-row">
+              <span>Free 用户</span>
+              <strong>{overview?.billingSummary.freeUsers ?? "-"}</strong>
+            </div>
+            <div className="mini-row">
+              <span>Plus 用户</span>
+              <strong>{overview?.billingSummary.plusUsers ?? "-"}</strong>
+            </div>
+            <div className="mini-row">
+              <span>活跃 Plus</span>
+              <strong>{overview?.billingSummary.activePlusUsers ?? "-"}</strong>
+            </div>
+            <div className="mini-row">
+              <span>累计模型成本</span>
+              <strong>
+                {overview ? `¥${overview.billingSummary.totalUsageCostCny.toFixed(2)}` : "-"}
+              </strong>
+            </div>
           </div>
         </article>
 

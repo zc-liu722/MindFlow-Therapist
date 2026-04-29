@@ -1,12 +1,11 @@
-import { API_DYNAMIC, API_RUNTIME } from "@/lib/api-config";
 import { errorResponse } from "@/lib/api-errors";
 import { applyUserRateLimit } from "@/lib/api-route";
 import { jsonWithKey } from "@/lib/api-response";
 import { requireRole } from "@/lib/auth";
 import { getSupervisionJournal } from "@/lib/domain";
 
-export const runtime = API_RUNTIME;
-export const dynamic = API_DYNAMIC;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
